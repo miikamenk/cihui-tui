@@ -26,4 +26,4 @@ cargo build --release
 
 The binary will be at `target/release/cihui-tui`.
 
-![TUI image](./img/tui.png)
+![TUI image](/img/tui.png)

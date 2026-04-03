@@ -1,7 +1,35 @@
 use cpal::traits::{DeviceTrait, HostTrait};
-use futures_util::StreamExt;
-use kalosm::sound::*;
+use cpal::SampleFormat;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
+use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+
+const WHISPER_SAMPLE_RATE: u32 = 16000;
+
+/// Handle to a running transcription session
+pub struct TranscriptionHandle {
+    pub transcription_task: tokio::task::JoinHandle<()>,
+    pub audio_thread: Option<std::thread::JoinHandle<()>>,
+    shutdown_signal: Arc<AtomicBool>,
+}
+
+impl TranscriptionHandle {
+    /// Signal the transcription session to stop and clean up resources
+    pub fn stop(&self) {
+        self.shutdown_signal.store(true, Ordering::SeqCst);
+    }
+
+    /// Stop and wait for cleanup
+    pub fn stop_and_wait(self) {
+        self.stop();
+        self.transcription_task.abort();
+        if let Some(audio_thread) = self.audio_thread {
+            let _ = audio_thread.join();
+        }
+    }
+}
 
 // --- Public API ---
 
@@ -20,24 +48,31 @@ pub struct AudioDevice {
     pub description: String, // Human-readable description (for display)
 }
 
-/// List input devices using pactl (PipeWire/PulseAudio), with fallback to cpal
+/// List input devices using cpal first (for device name matching), with fallback to pactl
 pub fn list_input_devices() -> Vec<AudioDevice> {
-    if let Some(devices) = list_devices_pactl() {
-        return devices;
-    }
-    // Fallback to cpal
+    // First try cpal device enumeration for better name compatibility
     let host = cpal::default_host();
     let mut devices = Vec::new();
+    
     if let Ok(input_devices) = host.input_devices() {
         for device in input_devices {
             if let Ok(name) = device.name() {
-                devices.push(AudioDevice {
-                    description: name.clone(),
-                    name,
-                });
+                // cpal device names might need cleaning up
+                let description = name.clone();
+                devices.push(AudioDevice { name, description });
             }
         }
     }
+    
+    if !devices.is_empty() {
+        return devices;
+    }
+    
+    // Fallback to pactl
+    if let Some(pactl_devices) = list_devices_pactl() {
+        return pactl_devices;
+    }
+    
     devices
 }
 
@@ -72,7 +107,6 @@ fn list_devices_pactl() -> Option<Vec<AudioDevice>> {
 }
 
 pub fn default_device_name() -> Option<String> {
-    // Try pactl to get default source
     if let Ok(output) = std::process::Command::new("pactl")
         .args(["get-default-source"])
         .output()
@@ -84,99 +118,356 @@ pub fn default_device_name() -> Option<String> {
             }
         }
     }
-    // Fallback to cpal
     let host = cpal::default_host();
     host.default_input_device().and_then(|d| d.name().ok())
 }
 
-fn whisper_source(model: WhisperModelSize) -> WhisperSource {
+fn model_repo_file(model: WhisperModelSize) -> (&'static str, &'static str) {
+    // Returns (repo_id, filename) on HuggingFace
     match model {
-        WhisperModelSize::Tiny => WhisperSource::Tiny,
-        WhisperModelSize::Base => WhisperSource::Base,
-        WhisperModelSize::Medium => WhisperSource::Medium,
-        WhisperModelSize::LargeV3Turbo => WhisperSource::QuantizedLargeV3Turbo,
+        WhisperModelSize::Tiny => ("ggerganov/whisper.cpp", "ggml-tiny.bin"),
+        WhisperModelSize::Base => ("ggerganov/whisper.cpp", "ggml-base.bin"),
+        WhisperModelSize::Medium => ("ggerganov/whisper.cpp", "ggml-medium.bin"),
+        WhisperModelSize::LargeV3Turbo => ("ggerganov/whisper.cpp", "ggml-large-v3-turbo.bin"),
     }
 }
 
-fn whisper_language(lang: TranscriptionLanguage) -> Option<WhisperLanguage> {
+fn whisper_language_code(lang: TranscriptionLanguage) -> Option<&'static str> {
     match lang {
-        TranscriptionLanguage::English => Some(WhisperLanguage::English),
-        TranscriptionLanguage::Chinese => Some(WhisperLanguage::Chinese),
+        TranscriptionLanguage::English => Some("en"),
+        TranscriptionLanguage::Chinese => Some("zh"),
         TranscriptionLanguage::Auto => None,
     }
 }
 
+/// Download model from HuggingFace if needed, return local path
+fn download_model(
+    model_size: WhisperModelSize,
+    tx: &mpsc::Sender<TranscriptionEvent>,
+) -> anyhow::Result<PathBuf> {
+    let (repo, filename) = model_repo_file(model_size);
+
+    let _ = tx.try_send(TranscriptionEvent::ModelLoading {
+        progress: 0.0,
+        status: format!("Downloading {}...", filename),
+    });
+
+    let api = hf_hub::api::sync::Api::new()?;
+    let repo = api.model(repo.to_string());
+    let path = repo.get(filename)?;
+
+    let _ = tx.try_send(TranscriptionEvent::ModelLoading {
+        progress: 1.0,
+        status: "Loading model...".into(),
+    });
+
+    Ok(path)
+}
+
 pub async fn load_model(
     model_size: WhisperModelSize,
-    language: TranscriptionLanguage,
+    _language: TranscriptionLanguage,
     tx: mpsc::Sender<TranscriptionEvent>,
-) -> anyhow::Result<Whisper> {
-    let source = whisper_source(model_size);
-    let lang = whisper_language(language);
+) -> anyhow::Result<Arc<WhisperContext>> {
+    let ctx = tokio::task::spawn_blocking(move || -> anyhow::Result<Arc<WhisperContext>> {
+        let model_path = download_model(model_size, &tx)?;
 
-    let tx_clone = tx.clone();
-    let model = Whisper::builder()
-        .with_source(source)
-        .with_language(lang)
-        .build_with_loading_handler(move |progress| match progress {
-            ModelLoadingProgress::Downloading {
-                source, progress, ..
-            } => {
-                let pct = if progress.size > 0 {
-                    progress.progress as f32 / progress.size as f32
-                } else {
-                    0.0
-                };
-                let _ = tx_clone.try_send(TranscriptionEvent::ModelLoading {
-                    progress: pct,
-                    status: format!("Downloading {}...", source),
-                });
-            }
-            ModelLoadingProgress::Loading { progress } => {
-                let _ = tx_clone.try_send(TranscriptionEvent::ModelLoading {
-                    progress,
-                    status: "Loading model...".into(),
-                });
-            }
-        })
-        .await?;
+        let _ = tx.try_send(TranscriptionEvent::ModelLoading {
+            progress: 0.5,
+            status: "Loading model into memory...".into(),
+        });
 
-    let _ = tx.send(TranscriptionEvent::ModelReady).await;
-    Ok(model)
+        let ctx = WhisperContext::new_with_params(
+            model_path.to_str().unwrap(),
+            WhisperContextParameters::default(),
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to load whisper model: {}", e))?;
+
+        let _ = tx.try_send(TranscriptionEvent::ModelReady);
+        Ok(Arc::new(ctx))
+    })
+    .await??;
+
+    Ok(ctx)
 }
 
 pub fn start_transcription(
-    model: Whisper,
+    ctx: Arc<WhisperContext>,
+    language: TranscriptionLanguage,
     device_name: Option<String>,
     tx: mpsc::Sender<TranscriptionEvent>,
-) -> tokio::task::JoinHandle<()> {
-    // Set PULSE_SOURCE so cpal/PipeWire picks up the selected device
+) -> TranscriptionHandle {
+    let lang_code = whisper_language_code(language);
+
+    // Audio capture uses cpal which is !Send, so run the capture setup
+    // on a dedicated thread and communicate via shared buffer
+    let audio_buf: Arc<std::sync::Mutex<Vec<f32>>> =
+        Arc::new(std::sync::Mutex::new(Vec::with_capacity(32000)));
+    let sample_rate_holder: Arc<std::sync::Mutex<u32>> =
+        Arc::new(std::sync::Mutex::new(WHISPER_SAMPLE_RATE));
+
+    // Shutdown signal for the audio thread
+    let shutdown_signal: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+
+    // Start audio capture on a std thread (not tokio) since cpal Stream is !Send
+    let audio_buf_capture = audio_buf.clone();
+    let sample_rate_capture = sample_rate_holder.clone();
+    let tx_err = tx.clone();
+    let device_name_capture = device_name.clone();
+    let shutdown_signal_capture = shutdown_signal.clone();
+    let audio_thread = std::thread::spawn(move || {
+        if let Err(e) = run_audio_capture(audio_buf_capture, sample_rate_capture, device_name_capture, shutdown_signal_capture) {
+            let _ = tx_err.try_send(TranscriptionEvent::Error(format!("Audio error: {}", e)));
+        }
+    });
+
+    // Transcription loop on tokio
+    let handle = tokio::spawn(async move {
+        let chunk_duration_secs = 2.0;
+
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs_f64(chunk_duration_secs)).await;
+
+            let sample_rate = *sample_rate_holder.lock().unwrap();
+            let samples = {
+                let mut buf = audio_buf.lock().unwrap();
+                std::mem::take(&mut *buf)
+            };
+
+            if samples.is_empty() {
+                continue;
+            }
+
+            // Resample to 16kHz if needed
+            let samples = if sample_rate != WHISPER_SAMPLE_RATE {
+                resample(&samples, sample_rate, WHISPER_SAMPLE_RATE)
+            } else {
+                samples
+            };
+
+            // Simple VAD: check RMS energy
+            let rms =
+                (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
+            let is_voice = rms > 0.005;
+            let _ = tx.send(TranscriptionEvent::VadActivity(is_voice)).await;
+
+            if !is_voice {
+                continue;
+            }
+
+            // Run whisper inference in blocking thread
+            let ctx = ctx.clone();
+            let tx = tx.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut state = match ctx.create_state() {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = tx.try_send(TranscriptionEvent::Error(format!(
+                            "Failed to create state: {}",
+                            e
+                        )));
+                        return;
+                    }
+                };
+
+                let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+                params.set_language(lang_code);
+                params.set_print_progress(false);
+                params.set_print_realtime(false);
+                params.set_print_timestamps(false);
+                params.set_no_context(true);
+                params.set_single_segment(false);
+
+                if let Err(e) = state.full(params, &samples) {
+                    let _ = tx
+                        .try_send(TranscriptionEvent::Error(format!("Inference error: {}", e)));
+                    return;
+                }
+
+                let n_segments = state.full_n_segments();
+
+                for i in 0..n_segments {
+                    if let Some(segment) = state.get_segment(i) {
+                        if let Ok(text) = segment.to_str() {
+                            let text = text.trim().to_string();
+                            if !text.is_empty() {
+                                let _ = tx.try_send(TranscriptionEvent::Segment(text));
+                            }
+                        }
+                    }
+                }
+            })
+            .await
+            .ok();
+        }
+    });
+
+    TranscriptionHandle {
+        transcription_task: handle,
+        audio_thread: Some(audio_thread),
+        shutdown_signal,
+    }
+}
+
+fn run_audio_capture(
+    audio_buf: Arc<std::sync::Mutex<Vec<f32>>>,
+    sample_rate_out: Arc<std::sync::Mutex<u32>>,
+    device_name: Option<String>,
+    shutdown_signal: Arc<AtomicBool>,
+) -> anyhow::Result<()> {
+    use cpal::traits::StreamTrait;
+
+    // Set PULSE_SOURCE environment variable BEFORE initializing cpal
+    // This tells PipeWire/PulseAudio which source to use as the default
     if let Some(ref name) = device_name {
+        eprintln!("[Audio] Setting PULSE_SOURCE to: {}", name);
         std::env::set_var("PULSE_SOURCE", name);
     } else {
         std::env::remove_var("PULSE_SOURCE");
     }
 
-    tokio::spawn(async move {
-        let mic = MicInput::default();
-        let stream = mic.stream();
-        let mut transcription = stream.transcribe(model);
-
-        while let Some(segment) = transcription.next().await {
-            let no_speech_prob = segment.probability_of_no_speech();
-            let is_voice = no_speech_prob < 0.5;
-            let _ = tx.send(TranscriptionEvent::VadActivity(is_voice)).await;
-
-            if no_speech_prob < 0.9 {
-                let text = segment.text().to_string();
-                if !text.trim().is_empty() {
-                    if tx.send(TranscriptionEvent::Segment(text)).await.is_err() {
+    let host = cpal::default_host();
+    
+    // Try to find the requested device by name, otherwise use default
+    let device = if let Some(ref name) = device_name {
+        eprintln!("[Audio] Looking for device: {}", name);
+        
+        // Search for device by name with more flexible matching
+        let mut found_device = None;
+        let name_lower = name.to_lowercase();
+        
+        if let Ok(devices) = host.input_devices() {
+            let device_list: Vec<_> = devices.collect();
+            eprintln!("[Audio] Found {} cpal devices", device_list.len());
+            
+            // First pass: try exact or substring match
+            for d in &device_list {
+                if let Ok(d_name) = d.name() {
+                    eprintln!("[Audio] Checking device: {}", d_name);
+                    let d_name_lower = d_name.to_lowercase();
+                    
+                    // Check for exact match
+                    if d_name_lower == name_lower {
+                        eprintln!("[Audio] Found exact match: {}", d_name);
+                        found_device = Some(d.clone());
+                        break;
+                    }
+                    
+                    // Check if either contains the other
+                    if d_name_lower.contains(&name_lower) || name_lower.contains(&d_name_lower) {
+                        eprintln!("[Audio] Found substring match: {}", d_name);
+                        found_device = Some(d.clone());
                         break;
                     }
                 }
             }
+            
+            // Second pass: word-based matching
+            if found_device.is_none() {
+                let name_words: Vec<&str> = name_lower.split_whitespace().collect();
+                for d in &device_list {
+                    if let Ok(d_name) = d.name() {
+                        let d_name_lower = d_name.to_lowercase();
+                        // Check if any significant word matches
+                        for word in &name_words {
+                            if word.len() > 3 && d_name_lower.contains(word) {
+                                eprintln!("[Audio] Found word match ({}): {}", word, d_name);
+                                found_device = Some(d.clone());
+                                break;
+                            }
+                        }
+                        if found_device.is_some() {
+                            break;
+                        }
+                    }
+                }
+            }
         }
-    })
+        
+        if found_device.is_none() {
+            eprintln!("[Audio] No matching device found, using default");
+        }
+        
+        found_device.or_else(|| host.default_input_device())
+    } else {
+        eprintln!("[Audio] No device specified, using default");
+        host.default_input_device()
+    }.ok_or_else(|| anyhow::anyhow!("No input device found"))?;
+
+    let device_name_str = device.name().unwrap_or_else(|_| "unknown".to_string());
+    eprintln!("[Audio] Using device: {}", device_name_str);
+
+    let config = device.default_input_config()?;
+    let sample_rate = config.sample_rate().0;
+    let channels = config.channels() as usize;
+    *sample_rate_out.lock().unwrap() = sample_rate;
+
+    let sample_format = config.sample_format();
+    let stream_config: cpal::StreamConfig = config.into();
+
+    let buf = audio_buf.clone();
+    let stream = match sample_format {
+        SampleFormat::F32 => device.build_input_stream(
+            &stream_config,
+            move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                let mut buf = buf.lock().unwrap();
+                for frame in data.chunks(channels) {
+                    let mono = frame.iter().sum::<f32>() / channels as f32;
+                    buf.push(mono);
+                }
+            },
+            |err| eprintln!("Audio stream error: {}", err),
+            None,
+        )?,
+        SampleFormat::I16 => {
+            let buf = audio_buf;
+            device.build_input_stream(
+                &stream_config,
+                move |data: &[i16], _: &cpal::InputCallbackInfo| {
+                    let mut buf = buf.lock().unwrap();
+                    for frame in data.chunks(channels) {
+                        let mono = frame.iter().map(|&s| s as f32 / 32768.0).sum::<f32>()
+                            / channels as f32;
+                        buf.push(mono);
+                    }
+                },
+                |err| eprintln!("Audio stream error: {}", err),
+                None,
+            )?
+        }
+        _ => anyhow::bail!("Unsupported sample format: {:?}", sample_format),
+    };
+
+    stream.play()?;
+
+    // Keep thread alive while stream is running, but check for shutdown signal periodically
+    while !shutdown_signal.load(Ordering::SeqCst) {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    // Stream will be dropped here, which stops the audio capture
+    Ok(())
+}
+
+/// Simple linear resampling
+fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
+    let ratio = to_rate as f64 / from_rate as f64;
+    let out_len = (samples.len() as f64 * ratio) as usize;
+    let mut out = Vec::with_capacity(out_len);
+    for i in 0..out_len {
+        let src_idx = i as f64 / ratio;
+        let idx = src_idx as usize;
+        let frac = src_idx - idx as f64;
+        let s = if idx + 1 < samples.len() {
+            samples[idx] as f64 * (1.0 - frac) + samples[idx + 1] as f64 * frac
+        } else if idx < samples.len() {
+            samples[idx] as f64
+        } else {
+            0.0
+        };
+        out.push(s as f32);
+    }
+    out
 }
 
 // --- Types used by app.rs and config.rs ---

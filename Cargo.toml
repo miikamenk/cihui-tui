@@ -19,9 +19,10 @@ required-features = ["transcription"]
 
 [features]
 default = ["ocr", "transcription"]
-transcription = ["kalosm", "cpal", "futures-util"]
+transcription = ["whisper-rs", "cpal", "hf-hub"]
 ocr = ["ocr-rs", "arboard", "image"]
-cuda = ["kalosm?/cuda"]
+vulkan = ["whisper-rs?/vulkan"]
+cuda = ["whisper-rs?/cuda"]
 
 [dependencies]
 ratatui = "0.30"
@@ -44,6 +45,6 @@ arboard = { version = "3.4", features = ["image"], optional = true }
 ocr-rs = { git = "https://github.com/zibo-chen/rust-paddle-ocr.git", optional = true }
 
 # Transcription dependencies (optional)
-kalosm = { version = "0.4", default-features = false, features = ["sound"], optional = true }
+whisper-rs = { version = "0.16", optional = true }
 cpal = { version = "0.15", optional = true }
-futures-util = { version = "0.3", optional = true }
+hf-hub = { version = "0.5", optional = true }

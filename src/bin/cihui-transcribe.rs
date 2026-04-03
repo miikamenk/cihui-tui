@@ -9,6 +9,9 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 use tokio::sync::mpsc;
 
+use std::sync::Arc;
+use whisper_rs::WhisperContext;
+
 use cihui_tui::app::App;
 use cihui_tui::config::TranslationService;
 use cihui_tui::ltengine;
@@ -66,9 +69,9 @@ async fn run_app<W: io::Write>(
     );
 
     let (transcription_tx, mut transcription_rx) = mpsc::channel::<TranscriptionEvent>(64);
-    let (model_tx, mut model_rx) = mpsc::channel::<kalosm::sound::Whisper>(1);
-    let mut whisper_model: Option<kalosm::sound::Whisper> = None;
-    let mut transcription_handle: Option<tokio::task::JoinHandle<()>> = None;
+    let (model_tx, mut model_rx) = mpsc::channel::<Arc<WhisperContext>>(1);
+    let mut whisper_model: Option<Arc<WhisperContext>> = None;
+    let mut transcription_handle: Option<transcription::TranscriptionHandle> = None;
 
     loop {
         terminal.draw(|f| draw_ui(f, app))?;
@@ -124,7 +127,22 @@ async fn run_app<W: io::Write>(
             event_result = async { crossterm::event::poll(timeout).map(|ready| if ready { event::read().ok() } else { None }) } => {
                 if let Ok(Some(Event::Key(key))) = event_result {
                     if app.transcription.device_selector_open {
-                        handle_device_selector_input(app, key);
+                        let device_changed = handle_device_selector_input(app, key);
+                        // If device changed while recording, restart transcription with new device
+                        if device_changed && app.transcription.is_recording {
+                            if let Some(ref model) = whisper_model {
+                                stop_transcription(&mut transcription_handle, app);
+                                let handle = transcription::start_transcription(
+                                    model.clone(),
+                                    app.transcription.language,
+                                    app.transcription.selected_device.clone(),
+                                    transcription_tx.clone(),
+                                );
+                                transcription_handle = Some(handle);
+                                app.transcription.is_recording = true;
+                                app.transcription.status = "Recording with new device...".into();
+                            }
+                        }
                         continue;
                     }
                     if app.transcription.settings_open {
@@ -187,6 +205,7 @@ async fn run_app<W: io::Write>(
                                 if let Some(ref model) = whisper_model {
                                     let handle = transcription::start_transcription(
                                         model.clone(),
+                                        app.transcription.language,
                                         app.transcription.selected_device.clone(),
                                         transcription_tx.clone(),
                                     );
@@ -228,11 +247,11 @@ async fn run_app<W: io::Write>(
 }
 
 fn stop_transcription(
-    handle: &mut Option<tokio::task::JoinHandle<()>>,
+    handle: &mut Option<transcription::TranscriptionHandle>,
     app: &mut App,
 ) {
     if let Some(h) = handle.take() {
-        h.abort();
+        h.stop_and_wait();
     }
     app.transcription.is_recording = false;
     app.transcription.vad_active = false;
@@ -241,26 +260,32 @@ fn stop_transcription(
     }
 }
 
-fn handle_device_selector_input(app: &mut App, key: crossterm::event::KeyEvent) {
+fn handle_device_selector_input(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
     match key.code {
         KeyCode::Esc => {
             app.transcription.device_selector_open = false;
+            false
         }
         KeyCode::Up => {
             if app.transcription.device_selector_scroll > 0 {
                 app.transcription.device_selector_scroll -= 1;
             }
+            false
         }
         KeyCode::Down => {
             let max = app.transcription.available_devices.len().saturating_sub(1);
             if app.transcription.device_selector_scroll < max {
                 app.transcription.device_selector_scroll += 1;
             }
+            false
         }
         KeyCode::Enter => {
+            let old_device = app.transcription.selected_device.clone();
             app.transcription_device_select();
+            // Return true if device changed
+            old_device != app.transcription.selected_device
         }
-        _ => {}
+        _ => false,
     }
 }
 

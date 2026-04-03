@@ -10,9 +10,20 @@ use crate::app::{App, AppMode, InputMode, UiLanguage};
 use crate::pinyin_conv::PinyinLine;
 
 pub fn draw_ui(f: &mut Frame, app: &App) {
-    match app.mode {
-        AppMode::Normal => draw_normal_mode(f, app),
-        AppMode::Transcription => draw_transcription_mode(f, app),
+    #[cfg(all(feature = "ocr", feature = "transcription"))]
+    {
+        match app.mode {
+            AppMode::Normal => draw_normal_mode(f, app),
+            AppMode::Transcription => draw_transcription_mode(f, app),
+        }
+    }
+    #[cfg(all(feature = "ocr", not(feature = "transcription")))]
+    {
+        draw_normal_mode(f, app)
+    }
+    #[cfg(all(not(feature = "ocr"), feature = "transcription"))]
+    {
+        draw_transcription_mode(f, app)
     }
 }
 
@@ -54,6 +65,7 @@ fn draw_normal_mode(f: &mut Frame, app: &App) {
     }
 }
 
+#[cfg(feature = "transcription")]
 fn draw_transcription_mode(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -521,6 +533,7 @@ fn draw_settings(f: &mut Frame, app: &App) {
     f.render_widget(settings_block, popup_area);
 }
 
+#[cfg(feature = "transcription")]
 fn draw_transcription_header(f: &mut Frame, app: &App, area: Rect) {
     let title = match app.ui_language {
         UiLanguage::English => "Transcription Mode",
@@ -567,6 +580,7 @@ fn draw_transcription_header(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(header, area);
 }
 
+#[cfg(feature = "transcription")]
 fn draw_transcript(f: &mut Frame, app: &App, area: Rect) {
     let label = match app.ui_language {
         UiLanguage::English => "Transcript",
@@ -601,6 +615,7 @@ fn draw_transcript(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(transcript, area);
 }
 
+#[cfg(feature = "transcription")]
 fn draw_transcription_pinyin(f: &mut Frame, app: &App, area: Rect) {
     let label = match app.ui_language {
         UiLanguage::English => "Pinyin",
@@ -649,6 +664,7 @@ fn draw_transcription_pinyin(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(widget, area);
 }
 
+#[cfg(feature = "transcription")]
 fn draw_transcription_translation(f: &mut Frame, app: &App, area: Rect) {
     let label = match app.ui_language {
         UiLanguage::English => "Translation",
@@ -682,6 +698,7 @@ fn draw_transcription_translation(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(widget, area);
 }
 
+#[cfg(feature = "transcription")]
 fn draw_transcription_status(f: &mut Frame, app: &App, area: Rect) {
     let recording_indicator = if app.transcription.is_recording {
         Span::styled(
@@ -692,15 +709,17 @@ fn draw_transcription_status(f: &mut Frame, app: &App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         )
     } else {
-        Span::styled(
-            " [STOP] ",
-            Style::default().fg(Color::Gray),
-        )
+        Span::styled(" [STOP] ", Style::default().fg(Color::Gray))
     };
 
     let vad_indicator = if app.transcription.is_recording {
         if app.transcription.vad_active {
-            Span::styled(" [VOICE] ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+            Span::styled(
+                " [VOICE] ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )
         } else {
             Span::styled(" [SILENCE] ", Style::default().fg(Color::DarkGray))
         }
@@ -731,6 +750,7 @@ fn draw_transcription_status(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(status, area);
 }
 
+#[cfg(feature = "transcription")]
 fn draw_device_selector(f: &mut Frame, app: &App) {
     let popup_area = centered_rect(70, 60, f.area());
     f.render_widget(Clear, popup_area);
@@ -747,7 +767,10 @@ fn draw_device_selector(f: &mut Frame, app: &App) {
             UiLanguage::English => "No audio input devices found",
             UiLanguage::Chinese => "未找到音频输入设备",
         };
-        lines.push(Line::from(Span::styled(msg, Style::default().fg(Color::Red))));
+        lines.push(Line::from(Span::styled(
+            msg,
+            Style::default().fg(Color::Red),
+        )));
     } else {
         let visible_count = (popup_area.height as usize).saturating_sub(4);
         let scroll = app.transcription.device_selector_scroll;
@@ -764,11 +787,8 @@ fn draw_device_selector(f: &mut Frame, app: &App) {
             .take(end - start)
         {
             let is_selected = idx == scroll;
-            let is_current = app
-                .transcription
-                .selected_device
-                .as_deref()
-                == Some(device.name.as_str());
+            let is_current =
+                app.transcription.selected_device.as_deref() == Some(device.name.as_str());
 
             let arrow = if is_selected { "> " } else { "  " };
             let check = if is_current { " [current]" } else { "" };
@@ -809,6 +829,7 @@ fn draw_device_selector(f: &mut Frame, app: &App) {
     f.render_widget(widget, popup_area);
 }
 
+#[cfg(feature = "transcription")]
 fn draw_transcription_settings(f: &mut Frame, app: &App) {
     let popup_area = centered_rect(60, 40, f.area());
     f.render_widget(Clear, popup_area);
@@ -859,7 +880,11 @@ fn draw_transcription_settings(f: &mut Frame, app: &App) {
     lines.push(Line::from(vec![
         Span::styled(arrow, style),
         Span::styled(
-            format!("{}: < {} >", model_label, app.transcription.model_size.name()),
+            format!(
+                "{}: < {} >",
+                model_label,
+                app.transcription.model_size.name()
+            ),
             style,
         ),
     ]));

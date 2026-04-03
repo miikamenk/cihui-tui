@@ -1,4 +1,5 @@
 use crate::language::Language;
+#[cfg(feature = "transcription")]
 use crate::transcription::{TranscriptionLanguage, WhisperModelSize};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -64,10 +65,13 @@ pub struct Config {
     pub ltengine_model: String,
     #[serde(default = "default_ltengine_path")]
     pub ltengine_path: String,
+    #[cfg(feature = "transcription")]
     #[serde(default)]
     pub transcription_language: TranscriptionLanguage,
+    #[cfg(feature = "transcription")]
     #[serde(default)]
     pub transcription_device: Option<String>,
+    #[cfg(feature = "transcription")]
     #[serde(default)]
     pub whisper_model: WhisperModelSize,
 }
@@ -91,6 +95,7 @@ impl Default for TranslationService {
 }
 
 impl Default for Config {
+    #[cfg(feature = "transcription")]
     fn default() -> Self {
         Self {
             target_language: Language::English,
@@ -101,6 +106,17 @@ impl Default for Config {
             transcription_language: TranscriptionLanguage::default(),
             transcription_device: None,
             whisper_model: WhisperModelSize::default(),
+        }
+    }
+
+    #[cfg(not(feature = "transcription"))]
+    fn default() -> Self {
+        Self {
+            target_language: Language::English,
+            translation_service: TranslationService::default(),
+            local_translate_url: default_local_translate_url(),
+            ltengine_model: default_ltengine_model(),
+            ltengine_path: default_ltengine_path(),
         }
     }
 }

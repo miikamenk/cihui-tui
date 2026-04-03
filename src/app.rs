@@ -1,10 +1,13 @@
 use crate::config::{Config, TranslationService};
 use crate::language::Language;
+#[cfg(feature = "transcription")]
 use crate::transcription::{AudioDevice, TranscriptionLanguage, WhisperModelSize};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum AppMode {
+    #[cfg(feature = "ocr")]
     Normal,
+    #[cfg(feature = "transcription")]
     Transcription,
 }
 
@@ -27,6 +30,7 @@ pub enum InputLanguage {
     Other,
 }
 
+#[cfg(feature = "transcription")]
 #[derive(Debug)]
 pub struct TranscriptionState {
     pub is_recording: bool,
@@ -50,6 +54,7 @@ pub struct TranscriptionState {
     pub transcript_scroll: u16,
 }
 
+#[cfg(feature = "transcription")]
 impl TranscriptionState {
     pub fn new(config: &Config) -> Self {
         Self {
@@ -78,6 +83,7 @@ impl TranscriptionState {
 
 #[derive(Debug)]
 pub struct App {
+    #[cfg(feature = "ocr")]
     pub mode: AppMode,
     pub input: String,
     pub pinyin_lines: Vec<String>,
@@ -103,11 +109,13 @@ pub struct App {
     pub last_input_time: Option<std::time::Instant>, // Track when user last typed
     pub pinyin_scroll: u16,                          // Scroll offset for pinyin display
     pub translation_scroll: u16,                     // Scroll offset for translation display
-    pub select_all: bool,                            // Whether all text is selected (next char replaces)
+    pub select_all: bool, // Whether all text is selected (next char replaces)
+    #[cfg(feature = "transcription")]
     pub transcription: TranscriptionState,
 }
 
 impl App {
+    #[cfg(all(feature = "ocr", feature = "transcription"))]
     pub fn new() -> Self {
         // Load config to get saved settings
         let config = Config::load().unwrap_or_default();
@@ -122,6 +130,91 @@ impl App {
 
         Self {
             mode: AppMode::Normal,
+            input: String::new(),
+            pinyin_lines: Vec::new(),
+            hanzi_lines: Vec::new(),
+            translation: String::new(),
+            input_mode: InputMode::Text,
+            ui_language: UiLanguage::English,
+            input_language: InputLanguage::Chinese,
+            target_language,
+            translation_service,
+            local_translate_url,
+            ltengine_model,
+            ltengine_path,
+            cursor_position: 0,
+            error_message: None,
+            processing: false,
+            settings_open: false,
+            settings_selection: 0,
+            language_selector_open: false,
+            language_selector_search: String::new(),
+            language_selector_scroll: 0,
+            filtered_languages: all_languages,
+            last_input_time: None,
+            pinyin_scroll: 0,
+            translation_scroll: 0,
+            select_all: false,
+            transcription,
+        }
+    }
+
+    #[cfg(all(feature = "ocr", not(feature = "transcription")))]
+    pub fn new() -> Self {
+        // Load config to get saved settings
+        let config = Config::load().unwrap_or_default();
+        let target_language = config.target_language;
+        let translation_service = config.translation_service;
+        let local_translate_url = config.local_translate_url.clone();
+        let ltengine_model = config.ltengine_model.clone();
+        let ltengine_path = config.ltengine_path.clone();
+
+        let all_languages = Language::all_for_picker();
+
+        Self {
+            mode: AppMode::Normal,
+            input: String::new(),
+            pinyin_lines: Vec::new(),
+            hanzi_lines: Vec::new(),
+            translation: String::new(),
+            input_mode: InputMode::Text,
+            ui_language: UiLanguage::English,
+            input_language: InputLanguage::Chinese,
+            target_language,
+            translation_service,
+            local_translate_url,
+            ltengine_model,
+            ltengine_path,
+            cursor_position: 0,
+            error_message: None,
+            processing: false,
+            settings_open: false,
+            settings_selection: 0,
+            language_selector_open: false,
+            language_selector_search: String::new(),
+            language_selector_scroll: 0,
+            filtered_languages: all_languages,
+            last_input_time: None,
+            pinyin_scroll: 0,
+            translation_scroll: 0,
+            select_all: false,
+        }
+    }
+
+    #[cfg(all(not(feature = "ocr"), feature = "transcription"))]
+    pub fn new() -> Self {
+        // Load config to get saved settings
+        let config = Config::load().unwrap_or_default();
+        let target_language = config.target_language;
+        let translation_service = config.translation_service;
+        let local_translate_url = config.local_translate_url.clone();
+        let ltengine_model = config.ltengine_model.clone();
+        let ltengine_path = config.ltengine_path.clone();
+        let transcription = TranscriptionState::new(&config);
+
+        let all_languages = Language::all_for_picker();
+
+        Self {
             input: String::new(),
             pinyin_lines: Vec::new(),
             hanzi_lines: Vec::new(),
@@ -186,24 +279,48 @@ impl App {
     }
 
     pub fn get_help_text(&self) -> &'static str {
-        match self.mode {
-            AppMode::Transcription => match self.ui_language {
+        #[cfg(all(feature = "ocr", feature = "transcription"))]
+        {
+            match self.mode {
+                AppMode::Transcription => match self.ui_language {
+                    UiLanguage::English => {
+                        "Space: Record | Ctrl+D: Device | Ctrl+S: Settings | Ctrl+X: Clear | Ctrl+T: Back | Esc: Quit"
+                    }
+                    UiLanguage::Chinese => {
+                        "空格: 录音 | Ctrl+D: 设备 | Ctrl+S: 设置 | Ctrl+X: 清空 | Ctrl+T: 返回 | Esc: 退出"
+                    }
+                },
+                AppMode::Normal => match self.ui_language {
+                    UiLanguage::English => {
+                        "Ctrl+T: Transcribe | Ctrl+L: Language | Ctrl+V: Paste | Ctrl+A: Select All | Ctrl+X: Clear | Ctrl+S: Settings | Esc: Quit"
+                    }
+                    UiLanguage::Chinese => "Ctrl+T: 转录 | Ctrl+L: 语言 | Ctrl+V: 粘贴 | Ctrl+A: 全选 | Ctrl+X: 清空 | Ctrl+S: 设置 | Esc: 退出",
+                },
+            }
+        }
+        #[cfg(all(feature = "ocr", not(feature = "transcription")))]
+        {
+            match self.ui_language {
                 UiLanguage::English => {
-                    "Space: Record | Ctrl+D: Device | Ctrl+S: Settings | Ctrl+X: Clear | Ctrl+T: Back | Esc: Quit"
+                    "Ctrl+L: Language | Ctrl+V: Paste | Ctrl+A: Select All | Ctrl+X: Clear | Ctrl+S: Settings | Esc: Quit"
+                }
+                UiLanguage::Chinese => "Ctrl+L: 语言 | Ctrl+V: 粘贴 | Ctrl+A: 全选 | Ctrl+X: 清空 | Ctrl+S: 设置 | Esc: 退出",
+            }
+        }
+        #[cfg(all(not(feature = "ocr"), feature = "transcription"))]
+        {
+            match self.ui_language {
+                UiLanguage::English => {
+                    "Space: Record | Ctrl+D: Device | Ctrl+S: Settings | Ctrl+X: Clear | Esc: Quit"
                 }
                 UiLanguage::Chinese => {
-                    "空格: 录音 | Ctrl+D: 设备 | Ctrl+S: 设置 | Ctrl+X: 清空 | Ctrl+T: 返回 | Esc: 退出"
+                    "空格: 录音 | Ctrl+D: 设备 | Ctrl+S: 设置 | Ctrl+X: 清空 | Esc: 退出"
                 }
-            },
-            AppMode::Normal => match self.ui_language {
-                UiLanguage::English => {
-                    "Ctrl+T: Transcribe | Ctrl+L: Language | Ctrl+V: Paste | Ctrl+A: Select All | Ctrl+X: Clear | Ctrl+S: Settings | Esc: Quit"
-                }
-                UiLanguage::Chinese => "Ctrl+T: 转录 | Ctrl+L: 语言 | Ctrl+V: 粘贴 | Ctrl+A: 全选 | Ctrl+X: 清空 | Ctrl+S: 设置 | Esc: 退出",
-            },
+            }
         }
     }
 
+    #[cfg(all(feature = "ocr", feature = "transcription"))]
     pub fn toggle_mode(&mut self) {
         self.mode = match self.mode {
             AppMode::Normal => {
@@ -216,6 +333,11 @@ impl App {
             }
             AppMode::Transcription => AppMode::Normal,
         };
+    }
+
+    #[cfg(all(not(feature = "ocr"), feature = "transcription"))]
+    pub fn toggle_mode(&mut self) {
+        // No-op: transcription-only build has no mode to toggle to
     }
 
     pub fn toggle_ui_language(&mut self) {
@@ -271,6 +393,7 @@ impl App {
         self.save_config();
     }
 
+    #[cfg(feature = "transcription")]
     fn save_config(&self) {
         let config = Config {
             target_language: self.target_language,
@@ -285,18 +408,33 @@ impl App {
         let _ = config.save();
     }
 
+    #[cfg(not(feature = "transcription"))]
+    fn save_config(&self) {
+        let config = Config {
+            target_language: self.target_language,
+            translation_service: self.translation_service,
+            local_translate_url: self.local_translate_url.clone(),
+            ltengine_model: self.ltengine_model.clone(),
+            ltengine_path: self.ltengine_path.clone(),
+        };
+        let _ = config.save();
+    }
+
+    #[cfg(feature = "transcription")]
     pub fn transcription_settings_move_up(&mut self) {
         if self.transcription.settings_selection > 0 {
             self.transcription.settings_selection -= 1;
         }
     }
 
+    #[cfg(feature = "transcription")]
     pub fn transcription_settings_move_down(&mut self) {
         if self.transcription.settings_selection < 1 {
             self.transcription.settings_selection += 1;
         }
     }
 
+    #[cfg(feature = "transcription")]
     pub fn transcription_settings_cycle_forward(&mut self) {
         match self.transcription.settings_selection {
             0 => {
@@ -312,6 +450,7 @@ impl App {
         self.save_config();
     }
 
+    #[cfg(feature = "transcription")]
     pub fn transcription_settings_cycle_backward(&mut self) {
         match self.transcription.settings_selection {
             0 => {
@@ -327,6 +466,7 @@ impl App {
         self.save_config();
     }
 
+    #[cfg(feature = "transcription")]
     pub fn toggle_transcription_device_selector(&mut self) {
         self.transcription.device_selector_open = !self.transcription.device_selector_open;
         if self.transcription.device_selector_open {
@@ -335,6 +475,7 @@ impl App {
         }
     }
 
+    #[cfg(feature = "transcription")]
     pub fn transcription_device_select(&mut self) {
         if let Some(device) = self
             .transcription
@@ -347,6 +488,7 @@ impl App {
         self.transcription.device_selector_open = false;
     }
 
+    #[cfg(feature = "transcription")]
     pub fn toggle_transcription_settings(&mut self) {
         self.transcription.settings_open = !self.transcription.settings_open;
         if self.transcription.settings_open {

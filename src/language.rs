@@ -553,6 +553,16 @@ impl Language {
     }
 }
 
+impl Language {
+    pub fn is_chinese(&self) -> bool {
+        matches!(self, Language::ChineseSimplified | Language::ChineseTraditional)
+    }
+
+    pub fn all_for_picker() -> Vec<Language> {
+        Self::all().into_iter().filter(|l| !l.is_chinese()).collect()
+    }
+}
+
 impl Default for Language {
     fn default() -> Self {
         Language::English

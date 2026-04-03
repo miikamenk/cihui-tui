@@ -12,6 +12,14 @@ enum Token {
 }
 
 pub fn convert_to_pinyin_lines(text: &str) -> Vec<PinyinLine> {
+    let mut all_lines: Vec<PinyinLine> = Vec::new();
+    for input_line in text.split('\n') {
+        all_lines.extend(convert_single_line(input_line));
+    }
+    all_lines
+}
+
+fn convert_single_line(text: &str) -> Vec<PinyinLine> {
     let max_line_width = 80; // Maximum display width per line
     let tokens = tokenize(text);
     let mut lines: Vec<PinyinLine> = Vec::new();

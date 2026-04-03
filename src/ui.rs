@@ -113,21 +113,46 @@ fn draw_input(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         app.input.clone()
     };
 
-    let input = Paragraph::new(text).block(block).wrap(Wrap { trim: true });
+    let text_style = if app.select_all {
+        Style::default().bg(Color::DarkGray).fg(Color::White)
+    } else {
+        Style::default()
+    };
+
+    let styled_lines: Vec<Line> = text
+        .split('\n')
+        .map(|line| Line::from(Span::styled(line.to_string(), text_style)))
+        .collect();
+    let input = Paragraph::new(Text::from(styled_lines))
+        .block(block)
+        .wrap(Wrap { trim: false });
 
     f.render_widget(input, area);
 
-    // Set cursor position
+    // Set cursor position for multi-line input with wrapping
     if !app.processing && !app.settings_open && !app.language_selector_open {
-        // Calculate visual width (Chinese chars = 2, ASCII = 1)
-        let visual_width: usize = app
-            .input
-            .chars()
-            .take(app.cursor_position)
-            .map(|c| if is_wide_char(c) { 2 } else { 1 })
-            .sum();
-        let cursor_x = area.x + 1 + visual_width as u16;
-        let cursor_y = area.y + 1;
+        let inner_width = (area.width as usize).saturating_sub(2); // subtract borders
+        let chars: Vec<char> = app.input.chars().collect();
+        let mut visual_row: u16 = 0;
+        let mut visual_col: usize = 0;
+
+        for i in 0..app.cursor_position.min(chars.len()) {
+            if chars[i] == '\n' {
+                visual_row += 1;
+                visual_col = 0;
+            } else {
+                let w = if is_wide_char(chars[i]) { 2 } else { 1 };
+                if inner_width > 0 && visual_col + w > inner_width {
+                    visual_row += 1;
+                    visual_col = w;
+                } else {
+                    visual_col += w;
+                }
+            }
+        }
+
+        let cursor_x = area.x + 1 + visual_col as u16;
+        let cursor_y = area.y + 1 + visual_row;
         if cursor_x < area.x + area.width && cursor_y < area.y + area.height {
             f.set_cursor_position((cursor_x, cursor_y));
         }
@@ -167,8 +192,6 @@ fn draw_pinyin(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 hanzi.clone(),
                 Style::default().fg(Color::White),
             )]));
-            // Empty line for spacing
-            lines.push(Line::from(vec![]));
         }
     }
 

@@ -42,6 +42,7 @@ pub struct App {
     pub last_input_time: Option<std::time::Instant>, // Track when user last typed
     pub pinyin_scroll: u16,                          // Scroll offset for pinyin display
     pub translation_scroll: u16,                     // Scroll offset for translation display
+    pub select_all: bool,                            // Whether all text is selected (next char replaces)
 }
 
 impl App {
@@ -51,7 +52,7 @@ impl App {
             .map(|c| c.target_language)
             .unwrap_or(Language::English);
 
-        let all_languages = Language::all();
+        let all_languages = Language::all_for_picker();
 
         Self {
             input: String::new(),
@@ -74,6 +75,7 @@ impl App {
             last_input_time: None,
             pinyin_scroll: 0,
             translation_scroll: 0,
+            select_all: false,
         }
     }
 
@@ -114,9 +116,9 @@ impl App {
     pub fn get_help_text(&self) -> &'static str {
         match self.ui_language {
             UiLanguage::English => {
-                "Ctrl+L: Language | Ctrl+V: Paste | Ctrl+X: Clear | Ctrl+S: Settings | Esc/Ctrl+C: Quit"
+                "Ctrl+L: Language | Ctrl+V: Paste | Ctrl+A: Select All | Ctrl+X: Clear | Ctrl+S: Settings | Esc/Ctrl+C: Quit"
             }
-            UiLanguage::Chinese => "Ctrl+L: 语言 | Ctrl+V: 粘贴 | Ctrl+X: 清空 | Ctrl+S: 设置 | Esc/Ctrl+C: 退出",
+            UiLanguage::Chinese => "Ctrl+L: 语言 | Ctrl+V: 粘贴 | Ctrl+A: 全选 | Ctrl+X: 清空 | Ctrl+S: 设置 | Esc/Ctrl+C: 退出",
         }
     }
 
@@ -139,7 +141,7 @@ impl App {
         if self.language_selector_open {
             self.language_selector_search.clear();
             self.language_selector_scroll = 0;
-            self.filtered_languages = Language::all();
+            self.filtered_languages = Language::all_for_picker();
         }
     }
 
@@ -201,7 +203,7 @@ impl App {
 
     fn filter_languages(&mut self) {
         let search = self.language_selector_search.to_lowercase();
-        self.filtered_languages = Language::all()
+        self.filtered_languages = Language::all_for_picker()
             .into_iter()
             .filter(|lang| lang.name().to_lowercase().contains(&search))
             .collect();
@@ -209,7 +211,7 @@ impl App {
 
     pub fn language_selector_clear_search(&mut self) {
         self.language_selector_search.clear();
-        self.filtered_languages = Language::all();
+        self.filtered_languages = Language::all_for_picker();
         self.language_selector_scroll = 0;
     }
 
@@ -284,6 +286,11 @@ impl App {
     }
 
     pub fn insert_char(&mut self, c: char) {
+        if self.select_all {
+            self.input.clear();
+            self.cursor_position = 0;
+            self.select_all = false;
+        }
         let byte_idx = self.char_to_byte_index(self.cursor_position);
         if byte_idx <= self.input.len() {
             self.input.insert(byte_idx, c);
@@ -312,31 +319,139 @@ impl App {
     }
 
     pub fn backspace(&mut self) {
+        if self.select_all {
+            self.select_all = false;
+            self.clear();
+            self.last_input_time = Some(std::time::Instant::now());
+            return;
+        }
         self.delete_char();
     }
 
     pub fn move_cursor_left(&mut self) {
+        self.select_all = false;
         if self.cursor_position > 0 {
             self.cursor_position -= 1;
         }
     }
 
     pub fn move_cursor_right(&mut self) {
+        self.select_all = false;
         let char_count = self.input.chars().count();
         if self.cursor_position < char_count {
             self.cursor_position += 1;
         }
     }
 
+    pub fn move_cursor_up(&mut self) {
+        self.select_all = false;
+        let chars: Vec<char> = self.input.chars().collect();
+        // Find start and column of current line
+        let mut line_start = 0;
+        let mut prev_line_start = None;
+        let mut pos = 0;
+        while pos < self.cursor_position {
+            if chars[pos] == '\n' {
+                prev_line_start = Some(line_start);
+                line_start = pos + 1;
+            }
+            pos += 1;
+        }
+        let col = self.cursor_position - line_start;
+        if let Some(prev_start) = prev_line_start {
+            let prev_line_len = line_start - 1 - prev_start; // exclude the \n
+            self.cursor_position = prev_start + col.min(prev_line_len);
+        }
+    }
+
+    pub fn move_cursor_down(&mut self) {
+        self.select_all = false;
+        let chars: Vec<char> = self.input.chars().collect();
+        // Find start of current line and column
+        let mut line_start = 0;
+        for i in 0..self.cursor_position {
+            if chars[i] == '\n' {
+                line_start = i + 1;
+            }
+        }
+        let col = self.cursor_position - line_start;
+        // Find next line
+        let mut next_line_start = None;
+        for i in self.cursor_position..chars.len() {
+            if chars[i] == '\n' {
+                next_line_start = Some(i + 1);
+                break;
+            }
+        }
+        if let Some(nls) = next_line_start {
+            // Find length of next line
+            let mut next_line_len = 0;
+            for i in nls..chars.len() {
+                if chars[i] == '\n' {
+                    break;
+                }
+                next_line_len += 1;
+            }
+            self.cursor_position = nls + col.min(next_line_len);
+        }
+    }
+
     pub fn move_cursor_to_start(&mut self) {
+        self.select_all = false;
         self.cursor_position = 0;
     }
 
     pub fn move_cursor_to_end(&mut self) {
+        self.select_all = false;
         self.cursor_position = self.input.chars().count();
     }
 
+    pub fn select_all(&mut self) {
+        self.select_all = true;
+        self.cursor_position = self.input.chars().count();
+    }
+
+    pub fn delete_word_backwards(&mut self) {
+        if self.select_all {
+            self.clear();
+            return;
+        }
+        if self.cursor_position == 0 {
+            return;
+        }
+        let chars: Vec<char> = self.input.chars().collect();
+        let mut new_pos = self.cursor_position;
+        // Skip whitespace
+        while new_pos > 0 && chars[new_pos - 1].is_whitespace() {
+            new_pos -= 1;
+        }
+        // Skip word characters
+        while new_pos > 0 && !chars[new_pos - 1].is_whitespace() {
+            new_pos -= 1;
+        }
+        let start_byte = self.char_to_byte_index(new_pos);
+        let end_byte = self.char_to_byte_index(self.cursor_position);
+        self.input.drain(start_byte..end_byte);
+        self.cursor_position = new_pos;
+        self.last_input_time = Some(std::time::Instant::now());
+    }
+
+    pub fn delete_to_start(&mut self) {
+        if self.select_all {
+            self.clear();
+            return;
+        }
+        if self.cursor_position == 0 {
+            return;
+        }
+        let byte_idx = self.char_to_byte_index(self.cursor_position);
+        self.input.drain(..byte_idx);
+        self.cursor_position = 0;
+        self.last_input_time = Some(std::time::Instant::now());
+    }
+
     pub fn set_input(&mut self, text: String) {
+        self.select_all = false;
         self.input = text;
         self.cursor_position = self.input.chars().count();
         self.last_input_time = Some(std::time::Instant::now());

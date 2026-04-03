@@ -145,6 +145,22 @@ async fn run_app(
                                 }
                                 continue;
                             }
+                            KeyCode::Char('a') | KeyCode::Char('A') => {
+                                app.select_all();
+                                continue;
+                            }
+                            KeyCode::Char('w') | KeyCode::Char('W') => {
+                                app.delete_word_backwards();
+                                continue;
+                            }
+                            KeyCode::Char('u') | KeyCode::Char('U') => {
+                                app.delete_to_start();
+                                continue;
+                            }
+                            KeyCode::Char('e') | KeyCode::Char('E') => {
+                                app.move_cursor_to_end();
+                                continue;
+                            }
                             KeyCode::Char('c') | KeyCode::Char('C') => {
                                 return Ok(());
                             }
@@ -168,6 +184,10 @@ async fn run_app(
                                 app.translation_scroll = app.translation_scroll.saturating_sub(3);
                                 continue;
                             }
+                            KeyCode::Backspace => {
+                                app.delete_word_backwards();
+                                continue;
+                            }
                             _ => {}
                         }
                     }
@@ -179,17 +199,26 @@ async fn run_app(
                             }
                             app.insert_char(c);
                         }
+                        KeyCode::Enter => {
+                            app.insert_char('\n');
+                        }
                         KeyCode::Backspace => {
                             app.backspace();
                         }
                         KeyCode::Delete => {
-                            let byte_idx = app.cursor_byte_index();
-                            if byte_idx < app.input.len() {
-                                let next_char = app.input[byte_idx..].chars().next();
-                                if let Some(ch) = next_char {
-                                    app.input.drain(byte_idx..(byte_idx + ch.len_utf8()));
-                                }
+                            if app.select_all {
+                                app.select_all = false;
+                                app.clear();
                                 app.last_input_time = Some(std::time::Instant::now());
+                            } else {
+                                let byte_idx = app.cursor_byte_index();
+                                if byte_idx < app.input.len() {
+                                    let next_char = app.input[byte_idx..].chars().next();
+                                    if let Some(ch) = next_char {
+                                        app.input.drain(byte_idx..(byte_idx + ch.len_utf8()));
+                                    }
+                                    app.last_input_time = Some(std::time::Instant::now());
+                                }
                             }
                         }
                         KeyCode::Left => {
@@ -197,6 +226,12 @@ async fn run_app(
                         }
                         KeyCode::Right => {
                             app.move_cursor_right();
+                        }
+                        KeyCode::Up => {
+                            app.move_cursor_up();
+                        }
+                        KeyCode::Down => {
+                            app.move_cursor_down();
                         }
                         KeyCode::Home => {
                             app.move_cursor_to_start();

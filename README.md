@@ -33,6 +33,6 @@ cargo build --release --bin cihui-ocr --features ocr --no-default-features
 cargo build --release --bin cihui-transcribe --features transcription,vulkan --no-default-features # you can use cuda instead of vulkan
 ```
 
-The binary will be at `target/release/cihui-tui`.
+The binary will be at `target/release/cihui-ocr` and `target/release/cihui-transcribe`.
 
 ![TUI image](/img/tui.png)

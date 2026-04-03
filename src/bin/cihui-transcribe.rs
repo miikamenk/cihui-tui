@@ -13,7 +13,6 @@ use cihui_tui::app::App;
 use cihui_tui::config::TranslationService;
 use cihui_tui::ltengine;
 use cihui_tui::pinyin_conv;
-use cihui_tui::single_instance;
 use cihui_tui::transcription::{self, TranscriptionEvent};
 use cihui_tui::translation;
 use cihui_tui::ui::draw_ui;
@@ -21,42 +20,11 @@ use cihui_tui::ui::draw_ui;
 #[derive(Parser, Debug)]
 #[command(name = "cihui-transcribe")]
 #[command(about = "Chinese vocabulary learning tool with transcription")]
-struct Cli {
-    #[arg(short, long, help = "Toggle: close the running instance if it exists")]
-    toggle: bool,
-}
+struct Cli {}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
-
-    if cli.toggle {
-        match single_instance::send_shutdown_signal() {
-            Ok(()) => {
-                println!("Sent shutdown signal to running instance.");
-                return Ok(());
-            }
-            Err(single_instance::SingleInstanceError::ToggleFailed(ref e))
-                if e.kind() == std::io::ErrorKind::ConnectionRefused =>
-            {
-                println!("No instance running, starting new instance...");
-            }
-            Err(e) => {
-                eprintln!("Failed to toggle: {}", e);
-                std::process::exit(1);
-            }
-        }
-    }
-
-    let listener = match single_instance::claim_instance() {
-        Ok(listener) => listener,
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    let shutdown_rx = single_instance::start_shutdown_server(listener);
+    let _cli = Cli::parse();
 
     let tty_fd = unsafe { libc::dup(1) };
     suppress_output();
@@ -71,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut app = App::new();
 
-    let res = run_app(&mut terminal, &mut app, shutdown_rx).await;
+    let res = run_app(&mut terminal, &mut app).await;
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -87,7 +55,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn run_app<W: io::Write>(
     terminal: &mut Terminal<CrosstermBackend<W>>,
     app: &mut App,
-    mut shutdown_rx: mpsc::Receiver<()>,
 ) -> io::Result<()> {
     let mut last_tick = std::time::Instant::now();
     let tick_rate = std::time::Duration::from_millis(250);
@@ -112,12 +79,6 @@ async fn run_app<W: io::Write>(
 
         tokio::select! {
             _ = tokio::time::sleep(timeout) => {}
-
-            _ = shutdown_rx.recv() => {
-                stop_transcription(&mut transcription_handle, app);
-                ltengine.shutdown().await;
-                return Ok(());
-            }
 
             Some(model) = model_rx.recv() => {
                 whisper_model = Some(model);

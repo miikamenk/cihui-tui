@@ -1,5 +1,12 @@
-use crate::config::Config;
+use crate::config::{Config, TranslationService};
 use crate::language::Language;
+use crate::transcription::{AudioDevice, TranscriptionLanguage, WhisperModelSize};
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum AppMode {
+    Normal,
+    Transcription,
+}
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum InputMode {
@@ -21,7 +28,57 @@ pub enum InputLanguage {
 }
 
 #[derive(Debug)]
+pub struct TranscriptionState {
+    pub is_recording: bool,
+    pub language: TranscriptionLanguage,
+    pub transcript: String,
+    pub pinyin_lines: Vec<String>,
+    pub hanzi_lines: Vec<String>,
+    pub translation: String,
+    pub vad_active: bool,
+    pub selected_device: Option<String>,
+    pub available_devices: Vec<AudioDevice>,
+    pub device_selector_open: bool,
+    pub device_selector_scroll: usize,
+    pub settings_open: bool,
+    pub settings_selection: usize,
+    pub status: String,
+    pub model_size: WhisperModelSize,
+    pub model_ready: bool,
+    pub model_loading: bool,
+    pub model_progress: f32,
+    pub transcript_scroll: u16,
+}
+
+impl TranscriptionState {
+    pub fn new(config: &Config) -> Self {
+        Self {
+            is_recording: false,
+            language: config.transcription_language,
+            transcript: String::new(),
+            pinyin_lines: Vec::new(),
+            hanzi_lines: Vec::new(),
+            translation: String::new(),
+            vad_active: false,
+            selected_device: config.transcription_device.clone(),
+            available_devices: Vec::new(),
+            device_selector_open: false,
+            device_selector_scroll: 0,
+            settings_open: false,
+            settings_selection: 0,
+            status: "Press Space to start recording".into(),
+            model_size: config.whisper_model,
+            model_ready: false,
+            model_loading: false,
+            model_progress: 0.0,
+            transcript_scroll: 0,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct App {
+    pub mode: AppMode,
     pub input: String,
     pub pinyin_lines: Vec<String>,
     pub hanzi_lines: Vec<String>,
@@ -30,6 +87,10 @@ pub struct App {
     pub ui_language: UiLanguage,
     pub input_language: InputLanguage,
     pub target_language: Language,
+    pub translation_service: TranslationService,
+    pub local_translate_url: String,
+    pub ltengine_model: String,
+    pub ltengine_path: String,
     pub cursor_position: usize, // Character index (not byte index)
     pub error_message: Option<String>,
     pub processing: bool,
@@ -43,18 +104,24 @@ pub struct App {
     pub pinyin_scroll: u16,                          // Scroll offset for pinyin display
     pub translation_scroll: u16,                     // Scroll offset for translation display
     pub select_all: bool,                            // Whether all text is selected (next char replaces)
+    pub transcription: TranscriptionState,
 }
 
 impl App {
     pub fn new() -> Self {
-        // Load config to get the saved target language
-        let target_language = Config::load()
-            .map(|c| c.target_language)
-            .unwrap_or(Language::English);
+        // Load config to get saved settings
+        let config = Config::load().unwrap_or_default();
+        let target_language = config.target_language;
+        let translation_service = config.translation_service;
+        let local_translate_url = config.local_translate_url.clone();
+        let ltengine_model = config.ltengine_model.clone();
+        let ltengine_path = config.ltengine_path.clone();
+        let transcription = TranscriptionState::new(&config);
 
         let all_languages = Language::all_for_picker();
 
         Self {
+            mode: AppMode::Normal,
             input: String::new(),
             pinyin_lines: Vec::new(),
             hanzi_lines: Vec::new(),
@@ -63,6 +130,10 @@ impl App {
             ui_language: UiLanguage::English,
             input_language: InputLanguage::Chinese,
             target_language,
+            translation_service,
+            local_translate_url,
+            ltengine_model,
+            ltengine_path,
             cursor_position: 0,
             error_message: None,
             processing: false,
@@ -76,6 +147,7 @@ impl App {
             pinyin_scroll: 0,
             translation_scroll: 0,
             select_all: false,
+            transcription,
         }
     }
 
@@ -114,12 +186,36 @@ impl App {
     }
 
     pub fn get_help_text(&self) -> &'static str {
-        match self.ui_language {
-            UiLanguage::English => {
-                "Ctrl+L: Language | Ctrl+V: Paste | Ctrl+A: Select All | Ctrl+X: Clear | Ctrl+S: Settings | Esc/Ctrl+C: Quit"
-            }
-            UiLanguage::Chinese => "Ctrl+L: 语言 | Ctrl+V: 粘贴 | Ctrl+A: 全选 | Ctrl+X: 清空 | Ctrl+S: 设置 | Esc/Ctrl+C: 退出",
+        match self.mode {
+            AppMode::Transcription => match self.ui_language {
+                UiLanguage::English => {
+                    "Space: Record | Ctrl+D: Device | Ctrl+S: Settings | Ctrl+X: Clear | Ctrl+T: Back | Esc: Quit"
+                }
+                UiLanguage::Chinese => {
+                    "空格: 录音 | Ctrl+D: 设备 | Ctrl+S: 设置 | Ctrl+X: 清空 | Ctrl+T: 返回 | Esc: 退出"
+                }
+            },
+            AppMode::Normal => match self.ui_language {
+                UiLanguage::English => {
+                    "Ctrl+T: Transcribe | Ctrl+L: Language | Ctrl+V: Paste | Ctrl+A: Select All | Ctrl+X: Clear | Ctrl+S: Settings | Esc: Quit"
+                }
+                UiLanguage::Chinese => "Ctrl+T: 转录 | Ctrl+L: 语言 | Ctrl+V: 粘贴 | Ctrl+A: 全选 | Ctrl+X: 清空 | Ctrl+S: 设置 | Esc: 退出",
+            },
         }
+    }
+
+    pub fn toggle_mode(&mut self) {
+        self.mode = match self.mode {
+            AppMode::Normal => {
+                self.transcription.available_devices = crate::transcription::list_input_devices();
+                if self.transcription.selected_device.is_none() {
+                    self.transcription.selected_device =
+                        crate::transcription::default_device_name();
+                }
+                AppMode::Transcription
+            }
+            AppMode::Transcription => AppMode::Normal,
+        };
     }
 
     pub fn toggle_ui_language(&mut self) {
@@ -152,16 +248,109 @@ impl App {
     }
 
     pub fn settings_move_down(&mut self) {
-        // Currently only 1 setting (UI Language), so max is 0
-        // Can be extended for more settings
-        // This is a no-op since we only have 1 setting
-        let _ = self.settings_selection; // suppress unused warning
+        if self.settings_selection < 1 {
+            self.settings_selection += 1;
+        }
     }
 
     pub fn settings_select(&mut self) {
         match self.settings_selection {
             0 => self.toggle_ui_language(),
+            1 => self.cycle_translation_service_forward(),
             _ => {}
+        }
+    }
+
+    pub fn cycle_translation_service_forward(&mut self) {
+        self.translation_service = self.translation_service.next();
+        self.save_config();
+    }
+
+    pub fn cycle_translation_service_backward(&mut self) {
+        self.translation_service = self.translation_service.prev();
+        self.save_config();
+    }
+
+    fn save_config(&self) {
+        let config = Config {
+            target_language: self.target_language,
+            translation_service: self.translation_service,
+            local_translate_url: self.local_translate_url.clone(),
+            ltengine_model: self.ltengine_model.clone(),
+            ltengine_path: self.ltengine_path.clone(),
+            transcription_language: self.transcription.language,
+            transcription_device: self.transcription.selected_device.clone(),
+            whisper_model: self.transcription.model_size,
+        };
+        let _ = config.save();
+    }
+
+    pub fn transcription_settings_move_up(&mut self) {
+        if self.transcription.settings_selection > 0 {
+            self.transcription.settings_selection -= 1;
+        }
+    }
+
+    pub fn transcription_settings_move_down(&mut self) {
+        if self.transcription.settings_selection < 1 {
+            self.transcription.settings_selection += 1;
+        }
+    }
+
+    pub fn transcription_settings_cycle_forward(&mut self) {
+        match self.transcription.settings_selection {
+            0 => {
+                self.transcription.language = self.transcription.language.next();
+                self.transcription.model_ready = false; // language baked into model
+            }
+            1 => {
+                self.transcription.model_size = self.transcription.model_size.next();
+                self.transcription.model_ready = false;
+            }
+            _ => {}
+        }
+        self.save_config();
+    }
+
+    pub fn transcription_settings_cycle_backward(&mut self) {
+        match self.transcription.settings_selection {
+            0 => {
+                self.transcription.language = self.transcription.language.prev();
+                self.transcription.model_ready = false;
+            }
+            1 => {
+                self.transcription.model_size = self.transcription.model_size.prev();
+                self.transcription.model_ready = false;
+            }
+            _ => {}
+        }
+        self.save_config();
+    }
+
+    pub fn toggle_transcription_device_selector(&mut self) {
+        self.transcription.device_selector_open = !self.transcription.device_selector_open;
+        if self.transcription.device_selector_open {
+            self.transcription.device_selector_scroll = 0;
+            self.transcription.available_devices = crate::transcription::list_input_devices();
+        }
+    }
+
+    pub fn transcription_device_select(&mut self) {
+        if let Some(device) = self
+            .transcription
+            .available_devices
+            .get(self.transcription.device_selector_scroll)
+        {
+            self.transcription.selected_device = Some(device.name.clone());
+            self.save_config();
+        }
+        self.transcription.device_selector_open = false;
+    }
+
+    pub fn toggle_transcription_settings(&mut self) {
+        self.transcription.settings_open = !self.transcription.settings_open;
+        if self.transcription.settings_open {
+            self.transcription.settings_selection = 0;
         }
     }
 
@@ -180,11 +369,7 @@ impl App {
     pub fn language_selector_select(&mut self) {
         if let Some(&language) = self.filtered_languages.get(self.language_selector_scroll) {
             self.target_language = language;
-            // Save the selection to config
-            let config = Config {
-                target_language: language,
-            };
-            let _ = config.save(); // Ignore save errors
+            self.save_config();
         }
         self.toggle_language_selector();
     }

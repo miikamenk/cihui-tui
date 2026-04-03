@@ -12,13 +12,16 @@ use tokio::sync::mpsc;
 mod app;
 mod config;
 mod language;
+mod ltengine;
 mod ocr;
 mod pinyin_conv;
 mod single_instance;
+mod transcription;
 mod translation;
 mod ui;
 
-use app::{App, InputMode};
+use app::{App, AppMode, InputMode};
+use transcription::TranscriptionEvent;
 use ui::{draw_ui, update_pinyin_display};
 
 #[derive(Parser, Debug)]
@@ -62,10 +65,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let shutdown_rx = single_instance::start_shutdown_server(listener);
 
+    // Dup stdout fd before redirecting, so the terminal backend can still write
+    let tty_fd = unsafe { libc::dup(1) };
+
+    // Redirect both stdout and stderr to /dev/null to suppress
+    // ALSA/JACK/PipeWire/candle library noise that corrupts the TUI
+    suppress_output();
+
+    // Create a File from the dup'd fd for the terminal backend
+    let tty_file = unsafe { std::os::unix::io::FromRawFd::from_raw_fd(tty_fd) };
+    let mut tty_write: std::fs::File = tty_file;
+
     enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
+    execute!(tty_write, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(tty_write);
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new();
@@ -83,14 +96,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn run_app(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+async fn run_app<W: io::Write>(
+    terminal: &mut Terminal<CrosstermBackend<W>>,
     app: &mut App,
     mut shutdown_rx: mpsc::Receiver<()>,
 ) -> io::Result<()> {
     let mut last_tick = std::time::Instant::now();
     let tick_rate = std::time::Duration::from_millis(250);
     let debounce_duration = std::time::Duration::from_millis(500);
+
+    // LTEngine process manager — always uses port 5050 (LTEngine default)
+    let mut ltengine = ltengine::LTEngine::new(
+        5050,
+        app.ltengine_model.clone(),
+        app.ltengine_path.clone(),
+    );
+
+    // Transcription state managed outside App (non-Send types)
+    let (transcription_tx, mut transcription_rx) = mpsc::channel::<TranscriptionEvent>(64);
+    let (model_tx, mut model_rx) = mpsc::channel::<kalosm::sound::Whisper>(1);
+    let mut whisper_model: Option<kalosm::sound::Whisper> = None;
+    let mut transcription_handle: Option<tokio::task::JoinHandle<()>> = None;
 
     loop {
         terminal.draw(|f| draw_ui(f, app))?;
@@ -105,12 +131,161 @@ async fn run_app(
             }
 
             _ = shutdown_rx.recv() => {
-                // Shutdown signal received
+                stop_transcription(&mut transcription_handle, app);
+                ltengine.shutdown().await;
                 return Ok(());
+            }
+
+            Some(model) = model_rx.recv() => {
+                whisper_model = Some(model);
+            }
+
+            Some(event) = transcription_rx.recv() => {
+                match event {
+                    TranscriptionEvent::ModelLoading { progress, status } => {
+                        app.transcription.model_loading = true;
+                        app.transcription.model_progress = progress;
+                        app.transcription.status = status;
+                    }
+                    TranscriptionEvent::ModelReady => {
+                        app.transcription.model_loading = false;
+                        app.transcription.model_ready = true;
+                        app.transcription.status = "Model ready. Press Space to record.".into();
+                    }
+                    TranscriptionEvent::Segment(text) => {
+                        if !app.transcription.transcript.is_empty()
+                            && !app.transcription.transcript.ends_with(' ')
+                            && !app.transcription.transcript.ends_with('\n')
+                        {
+                            app.transcription.transcript.push(' ');
+                        }
+                        app.transcription.transcript.push_str(text.trim());
+
+                        // Process the full transcript for pinyin + translation
+                        let full_text = app.transcription.transcript.clone();
+                        let target_lang = app.target_language;
+                        let service = app.translation_service;
+                        let local_url = app.local_translate_url.clone();
+                        process_transcription_text(app, &full_text, target_lang, service, &local_url, &mut ltengine).await;
+                    }
+                    TranscriptionEvent::VadActivity(active) => {
+                        app.transcription.vad_active = active;
+                    }
+                    TranscriptionEvent::Error(e) => {
+                        app.transcription.status = format!("Error: {}", e);
+                        app.transcription.is_recording = false;
+                    }
+                }
             }
 
             event_result = async { crossterm::event::poll(timeout).map(|ready| if ready { event::read().ok() } else { None }) } => {
                 if let Ok(Some(Event::Key(key))) = event_result {
+                    // --- Transcription mode input ---
+                    if app.mode == AppMode::Transcription {
+                        if app.transcription.device_selector_open {
+                            handle_device_selector_input(app, key);
+                            continue;
+                        }
+                        if app.transcription.settings_open {
+                            handle_transcription_settings_input(app, key);
+                            // Clear cached model if settings changed it
+                            if !app.transcription.model_ready {
+                                whisper_model = None;
+                                app.transcription.status = "Settings changed. Press Space to reload model and record.".into();
+                            }
+                            continue;
+                        }
+
+                        if key.code == KeyCode::Esc {
+                            stop_transcription(&mut transcription_handle, app);
+                            ltengine.shutdown().await;
+                            return Ok(());
+                        }
+
+                        if key.modifiers.contains(KeyModifiers::CONTROL) {
+                            match key.code {
+                                KeyCode::Char('t') | KeyCode::Char('T') => {
+                                    stop_transcription(&mut transcription_handle, app);
+                                    app.toggle_mode();
+                                    continue;
+                                }
+                                KeyCode::Char('d') | KeyCode::Char('D') => {
+                                    app.toggle_transcription_device_selector();
+                                    continue;
+                                }
+                                KeyCode::Char('s') | KeyCode::Char('S') => {
+                                    app.toggle_transcription_settings();
+                                    continue;
+                                }
+                                KeyCode::Char('x') | KeyCode::Char('X') => {
+                                    app.transcription.transcript.clear();
+                                    app.transcription.pinyin_lines.clear();
+                                    app.transcription.hanzi_lines.clear();
+                                    app.transcription.translation.clear();
+                                    app.transcription.transcript_scroll = 0;
+                                    continue;
+                                }
+                                KeyCode::Char('c') | KeyCode::Char('C') => {
+                                    stop_transcription(&mut transcription_handle, app);
+                                    ltengine.shutdown().await;
+                                    return Ok(());
+                                }
+                                KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
+                                    app.transcription.transcript_scroll =
+                                        app.transcription.transcript_scroll.saturating_sub(3);
+                                    continue;
+                                }
+                                KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
+                                    app.transcription.transcript_scroll =
+                                        app.transcription.transcript_scroll.saturating_add(3);
+                                    continue;
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        match key.code {
+                            KeyCode::Char(' ') => {
+                                if app.transcription.is_recording {
+                                    stop_transcription(&mut transcription_handle, app);
+                                } else if app.transcription.model_ready {
+                                    if let Some(ref model) = whisper_model {
+                                        let handle = transcription::start_transcription(
+                                            model.clone(),
+                                            app.transcription.selected_device.clone(),
+                                            transcription_tx.clone(),
+                                        );
+                                        transcription_handle = Some(handle);
+                                        app.transcription.is_recording = true;
+                                        app.transcription.status = "Recording...".into();
+                                    }
+                                } else if !app.transcription.model_loading {
+                                    let tx = transcription_tx.clone();
+                                    let mtx = model_tx.clone();
+                                    let model_size = app.transcription.model_size;
+                                    let language = app.transcription.language;
+                                    app.transcription.model_loading = true;
+                                    app.transcription.status = "Loading model...".into();
+                                    tokio::spawn(async move {
+                                        match transcription::load_model(model_size, language, tx.clone()).await {
+                                            Ok(m) => { let _ = mtx.send(m).await; }
+                                            Err(e) => {
+                                                let _ = tx.send(TranscriptionEvent::Error(
+                                                    format!("Model load failed: {}", e),
+                                                )).await;
+                                            }
+                                        }
+                                    });
+                                }
+                                continue;
+                            }
+                            _ => {}
+                        }
+
+                        continue;
+                    }
+
+                    // --- Normal mode input ---
                     if app.language_selector_open {
                         handle_language_selector_input(app, key).await;
                         continue;
@@ -122,11 +297,38 @@ async fn run_app(
                     }
 
                     if key.code == KeyCode::Esc {
+                        ltengine.shutdown().await;
                         return Ok(());
                     }
 
                     if key.modifiers.contains(KeyModifiers::CONTROL) {
                         match key.code {
+                            KeyCode::Char('t') | KeyCode::Char('T') => {
+                                app.toggle_mode();
+                                // Start loading model on first entry
+                                if app.mode == AppMode::Transcription
+                                    && whisper_model.is_none()
+                                    && !app.transcription.model_loading
+                                {
+                                    let tx = transcription_tx.clone();
+                                    let mtx = model_tx.clone();
+                                    let model_size = app.transcription.model_size;
+                                    let language = app.transcription.language;
+                                    app.transcription.model_loading = true;
+                                    app.transcription.status = "Loading model...".into();
+                                    tokio::spawn(async move {
+                                        match transcription::load_model(model_size, language, tx.clone()).await {
+                                            Ok(m) => { let _ = mtx.send(m).await; }
+                                            Err(e) => {
+                                                let _ = tx.send(TranscriptionEvent::Error(
+                                                    format!("Model load failed: {}", e),
+                                                )).await;
+                                            }
+                                        }
+                                    });
+                                }
+                                continue;
+                            }
                             KeyCode::Char('l') | KeyCode::Char('L') => {
                                 app.toggle_language_selector();
                                 continue;
@@ -162,6 +364,7 @@ async fn run_app(
                                 continue;
                             }
                             KeyCode::Char('c') | KeyCode::Char('C') => {
+                                ltengine.shutdown().await;
                                 return Ok(());
                             }
                             KeyCode::Up => {
@@ -248,19 +451,82 @@ async fn run_app(
         if last_tick.elapsed() >= tick_rate {
             last_tick = std::time::Instant::now();
 
-            if let Some(last_input) = app.last_input_time {
-                if !app.processing && !app.input.trim().is_empty() {
-                    let elapsed = last_input.elapsed();
-                    if elapsed >= debounce_duration {
-                        app.last_input_time = None;
+            // Check if LTEngine should be shut down due to idle
+            ltengine.check_idle().await;
 
-                        if let Err(e) = process_input(app).await {
-                            app.error_message = Some(format!("Processing error: {}", e));
+            if app.mode == AppMode::Normal {
+                if let Some(last_input) = app.last_input_time {
+                    if !app.processing && !app.input.trim().is_empty() {
+                        let elapsed = last_input.elapsed();
+                        if elapsed >= debounce_duration {
+                            app.last_input_time = None;
+
+                            if let Err(e) = process_input(app, &mut ltengine).await {
+                                app.error_message = Some(format!("Processing error: {}", e));
+                            }
                         }
                     }
                 }
             }
         }
+    }
+}
+
+fn stop_transcription(
+    handle: &mut Option<tokio::task::JoinHandle<()>>,
+    app: &mut App,
+) {
+    if let Some(h) = handle.take() {
+        h.abort();
+    }
+    app.transcription.is_recording = false;
+    app.transcription.vad_active = false;
+    if app.transcription.model_ready {
+        app.transcription.status = "Stopped. Press Space to record.".into();
+    }
+}
+
+fn handle_device_selector_input(app: &mut App, key: crossterm::event::KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            app.transcription.device_selector_open = false;
+        }
+        KeyCode::Up => {
+            if app.transcription.device_selector_scroll > 0 {
+                app.transcription.device_selector_scroll -= 1;
+            }
+        }
+        KeyCode::Down => {
+            let max = app.transcription.available_devices.len().saturating_sub(1);
+            if app.transcription.device_selector_scroll < max {
+                app.transcription.device_selector_scroll += 1;
+            }
+        }
+        KeyCode::Enter => {
+            app.transcription_device_select();
+        }
+        _ => {}
+    }
+}
+
+fn handle_transcription_settings_input(app: &mut App, key: crossterm::event::KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            app.transcription.settings_open = false;
+        }
+        KeyCode::Up => {
+            app.transcription_settings_move_up();
+        }
+        KeyCode::Down => {
+            app.transcription_settings_move_down();
+        }
+        KeyCode::Left => {
+            app.transcription_settings_cycle_backward();
+        }
+        KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
+            app.transcription_settings_cycle_forward();
+        }
+        _ => {}
     }
 }
 
@@ -277,6 +543,16 @@ async fn handle_settings_input(app: &mut App, key: crossterm::event::KeyEvent) {
         }
         KeyCode::Enter | KeyCode::Char(' ') => {
             app.settings_select();
+        }
+        KeyCode::Left => {
+            if app.settings_selection == 1 {
+                app.cycle_translation_service_backward();
+            }
+        }
+        KeyCode::Right => {
+            if app.settings_selection == 1 {
+                app.cycle_translation_service_forward();
+            }
         }
         _ => {}
     }
@@ -584,20 +860,74 @@ async fn download_and_recognize(url: &str) -> anyhow::Result<ocr::OcrResult> {
     ocr::recognize_image(&bytes).await
 }
 
-async fn process_input(app: &mut App) -> anyhow::Result<()> {
+async fn process_input(app: &mut App, ltengine: &mut ltengine::LTEngine) -> anyhow::Result<()> {
     app.processing = true;
     app.error_message = None;
 
     let result = match app.input_mode {
-        InputMode::Text => process_text_input(app).await,
-        InputMode::ImagePath => process_image_input(app).await,
+        InputMode::Text => process_text_input(app, ltengine).await,
+        InputMode::ImagePath => process_image_input(app, ltengine).await,
     };
 
     app.processing = false;
     result
 }
 
-async fn process_text_input(app: &mut App) -> anyhow::Result<()> {
+async fn process_transcription_text(
+    app: &mut App,
+    text: &str,
+    target_language: crate::language::Language,
+    service: crate::config::TranslationService,
+    local_url: &str,
+    ltengine: &mut ltengine::LTEngine,
+) {
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+
+    // Detect if text is Chinese
+    let has_chinese = text.chars().any(|c| {
+        ('\u{4e00}'..='\u{9fff}').contains(&c)
+            || ('\u{3400}'..='\u{4dbf}').contains(&c)
+            || ('\u{f900}'..='\u{faff}').contains(&c)
+    });
+
+    if has_chinese {
+        // Chinese input: show pinyin, translate to target language
+        let pinyin_lines = pinyin_conv::convert_to_pinyin_lines(text);
+        app.transcription.pinyin_lines.clear();
+        app.transcription.hanzi_lines.clear();
+        for line in pinyin_lines {
+            app.transcription.pinyin_lines.push(line.pinyin);
+            app.transcription.hanzi_lines.push(line.hanzi);
+        }
+
+        let target_code = target_language.google_code();
+        match translation::translate("zh-CN", target_code, text, service, local_url, ltengine).await {
+            Ok(t) => app.transcription.translation = t,
+            Err(_) => {}
+        }
+    } else {
+        // Non-Chinese input: translate to Chinese, show pinyin of Chinese
+        let target_code = target_language.google_code();
+        match translation::translate(target_code, "zh-CN", text, service, local_url, ltengine).await {
+            Ok(chinese_text) => {
+                let pinyin_lines = pinyin_conv::convert_to_pinyin_lines(&chinese_text);
+                app.transcription.pinyin_lines.clear();
+                app.transcription.hanzi_lines.clear();
+                for line in pinyin_lines {
+                    app.transcription.pinyin_lines.push(line.pinyin);
+                    app.transcription.hanzi_lines.push(line.hanzi);
+                }
+                app.transcription.translation = chinese_text;
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+async fn process_text_input(app: &mut App, ltengine: &mut ltengine::LTEngine) -> anyhow::Result<()> {
     let text = app.input.trim().to_string();
     if text.is_empty() {
         return Ok(());
@@ -611,7 +941,7 @@ async fn process_text_input(app: &mut App) -> anyhow::Result<()> {
         let pinyin_lines = pinyin_conv::convert_to_pinyin_lines(&text);
         update_pinyin_display(app, pinyin_lines);
 
-        match translation::translate("zh-CN", target_lang_code, &text).await {
+        match translation::translate("zh-CN", target_lang_code, &text, app.translation_service, &app.local_translate_url, ltengine).await {
             Ok(translation) => {
                 app.translation = translation;
             }
@@ -625,7 +955,7 @@ async fn process_text_input(app: &mut App) -> anyhow::Result<()> {
         let target_lang_code = app.target_language.google_code();
 
         // First, translate from the detected language to Chinese
-        match translation::translate(target_lang_code, "zh-CN", &text).await {
+        match translation::translate(target_lang_code, "zh-CN", &text, app.translation_service, &app.local_translate_url, ltengine).await {
             Ok(chinese_text) => {
                 // Show the Chinese text with pinyin
                 let pinyin_lines = pinyin_conv::convert_to_pinyin_lines(&chinese_text);
@@ -649,7 +979,7 @@ async fn process_text_input(app: &mut App) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn process_image_input(app: &mut App) -> anyhow::Result<()> {
+async fn process_image_input(app: &mut App, ltengine: &mut ltengine::LTEngine) -> anyhow::Result<()> {
     let input = app.input.trim();
 
     use arboard::Clipboard;
@@ -710,5 +1040,20 @@ async fn process_image_input(app: &mut App) -> anyhow::Result<()> {
 
     app.input = text.clone();
 
-    process_text_input(app).await
+    process_text_input(app, ltengine).await
+}
+
+/// Redirect stdout and stderr to /dev/null to suppress ALSA/JACK/PipeWire/candle
+/// library noise. The caller must `libc::dup(1)` *before* calling this so the
+/// terminal backend can still write to the original tty fd.
+fn suppress_output() {
+    use std::fs::OpenOptions;
+    use std::os::unix::io::AsRawFd;
+
+    if let Ok(dev_null) = OpenOptions::new().write(true).open("/dev/null") {
+        unsafe {
+            libc::dup2(dev_null.as_raw_fd(), 1); // stdout
+            libc::dup2(dev_null.as_raw_fd(), 2); // stderr
+        }
+    }
 }

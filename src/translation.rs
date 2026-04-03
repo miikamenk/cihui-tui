@@ -1,3 +1,5 @@
+use crate::config::TranslationService;
+use crate::ltengine::LTEngine;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -18,13 +20,52 @@ struct ResponseData {
     translated_text: String,
 }
 
-/// Translate text from source language to target language
-pub async fn translate(source: &str, target: &str, text: &str) -> anyhow::Result<String> {
+/// Translate text from source language to target language using the specified service
+pub async fn translate(
+    source: &str,
+    target: &str,
+    text: &str,
+    service: TranslationService,
+    local_url: &str,
+    ltengine: &mut LTEngine,
+) -> anyhow::Result<String> {
     if text.is_empty() {
         return Ok(String::new());
     }
 
-    // Try multiple translation APIs in order
+    match service {
+        TranslationService::Auto => translate_auto(source, target, text, local_url, ltengine).await,
+        TranslationService::Google => {
+            translate_with_google(text, source, target)
+                .await
+                .or_else(|_| Ok(format!("[Google Translate unavailable] {}", text)))
+        }
+        TranslationService::MyMemory => {
+            translate_with_mymemory(text, source, target)
+                .await
+                .or_else(|_| Ok(format!("[MyMemory unavailable] {}", text)))
+        }
+        TranslationService::LibreTranslate => {
+            translate_with_libretranslate(text, source, target)
+                .await
+                .or_else(|_| Ok(format!("[LibreTranslate unavailable] {}", text)))
+        }
+        TranslationService::LTEngine => {
+            translate_with_ltengine(text, source, target, ltengine)
+                .await
+                .or_else(|e| Ok(format!("[LTEngine: {}] {}", e, text)))
+        }
+    }
+}
+
+/// Auto mode: try all services in order, with LTEngine last
+async fn translate_auto(
+    source: &str,
+    target: &str,
+    text: &str,
+    _local_url: &str,
+    ltengine: &mut LTEngine,
+) -> anyhow::Result<String> {
     if let Ok(translation) = translate_with_google(text, source, target).await {
         return Ok(translation);
     }
@@ -34,8 +75,10 @@ pub async fn translate(source: &str, target: &str, text: &str) -> anyhow::Result
     if let Ok(translation) = translate_with_libretranslate(text, source, target).await {
         return Ok(translation);
     }
+    if let Ok(translation) = translate_with_ltengine(text, source, target, ltengine).await {
+        return Ok(translation);
+    }
 
-    // Final fallback: return a message with the original text
     Ok(format!(
         "[Translation unavailable - {} to {}] {}",
         source, target, text
@@ -44,14 +87,14 @@ pub async fn translate(source: &str, target: &str, text: &str) -> anyhow::Result
 
 /// Legacy function for Chinese to English translation
 #[allow(dead_code)]
-pub async fn translate_chinese_to_english(text: &str) -> anyhow::Result<String> {
-    translate("zh-CN", "en", text).await
+pub async fn translate_chinese_to_english(text: &str, ltengine: &mut LTEngine) -> anyhow::Result<String> {
+    translate("zh-CN", "en", text, TranslationService::Auto, "http://localhost:5050", ltengine).await
 }
 
 /// Legacy function for English to Chinese translation
 #[allow(dead_code)]
-pub async fn translate_english_to_chinese(text: &str) -> anyhow::Result<String> {
-    translate("en", "zh-CN", text).await
+pub async fn translate_english_to_chinese(text: &str, ltengine: &mut LTEngine) -> anyhow::Result<String> {
+    translate("en", "zh-CN", text, TranslationService::Auto, "http://localhost:5050", ltengine).await
 }
 
 async fn translate_with_google(text: &str, source: &str, target: &str) -> anyhow::Result<String> {
@@ -178,6 +221,69 @@ async fn translate_with_libretranslate(
     }
 
     Err(anyhow::anyhow!("All LibreTranslate servers failed"))
+}
+
+/// Map Google Translate language codes to LTEngine-compatible codes.
+fn to_ltengine_code(code: &str) -> &str {
+    match code {
+        "zh-CN" | "zh" => "zh-Hans",
+        "zh-TW" => "zh-Hant",
+        "no" => "nb",
+        "fil" => "tl",
+        other => other,
+    }
+}
+
+/// Translate using a local LTEngine instance, starting it if needed.
+async fn translate_with_ltengine(
+    text: &str,
+    source: &str,
+    target: &str,
+    ltengine: &mut LTEngine,
+) -> anyhow::Result<String> {
+    ltengine.ensure_running().await?;
+
+    let source = to_ltengine_code(source);
+    let target = to_ltengine_code(target);
+
+    let client = reqwest::Client::new();
+    let url = format!("{}/translate", ltengine.base_url());
+
+    let request = serde_json::json!({
+        "q": text,
+        "source": source,
+        "target": target,
+        "format": "text"
+    });
+
+    let response = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .json(&request)
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        return Err(anyhow::anyhow!(
+            "LTEngine returned error: {}",
+            response.status()
+        ));
+    }
+
+    ltengine.touch();
+
+    let body = response.text().await?;
+    match serde_json::from_str::<LibreTranslateResponse>(&body) {
+        Ok(data) => Ok(data.translated_text),
+        Err(e) => {
+            eprintln!("LTEngine response: {}", body);
+            Err(anyhow::anyhow!(
+                "Failed to parse LTEngine response: {}",
+                e
+            ))
+        }
+    }
 }
 
 // Alternative: Simple word-by-word dictionary for common words

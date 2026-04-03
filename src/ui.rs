@@ -6,10 +6,17 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, InputMode, UiLanguage};
+use crate::app::{App, AppMode, InputMode, UiLanguage};
 use crate::pinyin_conv::PinyinLine;
 
 pub fn draw_ui(f: &mut Frame, app: &App) {
+    match app.mode {
+        AppMode::Normal => draw_normal_mode(f, app),
+        AppMode::Transcription => draw_transcription_mode(f, app),
+    }
+}
+
+fn draw_normal_mode(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -44,6 +51,35 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
     // Settings overlay (if open)
     if app.settings_open {
         draw_settings(f, app);
+    }
+}
+
+fn draw_transcription_mode(f: &mut Frame, app: &App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),      // Header
+            Constraint::Percentage(30), // Transcript (original text)
+            Constraint::Percentage(30), // Pinyin
+            Constraint::Percentage(30), // Translation
+            Constraint::Length(3),      // Status bar
+            Constraint::Length(2),      // Help
+        ])
+        .split(f.area());
+
+    draw_transcription_header(f, app, chunks[0]);
+    draw_transcript(f, app, chunks[1]);
+    draw_transcription_pinyin(f, app, chunks[2]);
+    draw_transcription_translation(f, app, chunks[3]);
+    draw_transcription_status(f, app, chunks[4]);
+    draw_help(f, app, chunks[5]);
+
+    if app.transcription.device_selector_open {
+        draw_device_selector(f, app);
+    }
+
+    if app.transcription.settings_open {
+        draw_transcription_settings(f, app);
     }
 }
 
@@ -437,13 +473,36 @@ fn draw_settings(f: &mut Frame, app: &App) {
         Span::styled(format!("{}: {}", lang_label, lang_value), style),
     ]));
 
+    // Translation Service setting
+    let service_label = match app.ui_language {
+        UiLanguage::English => "Translation Service",
+        UiLanguage::Chinese => "翻译服务",
+    };
+    let service_value = app.translation_service.name();
+
+    let is_selected = app.settings_selection == 1;
+    let style = if is_selected {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White)
+    };
+
+    let arrow = if is_selected { "> " } else { "  " };
+
+    lines.push(Line::from(vec![
+        Span::styled(arrow, style),
+        Span::styled(format!("{}: < {} >", service_label, service_value), style),
+    ]));
+
     // Add empty line
     lines.push(Line::from(vec![]));
 
     // Instructions
     let instructions = match app.ui_language {
-        UiLanguage::English => "Press Enter to toggle",
-        UiLanguage::Chinese => "按 Enter 键切换",
+        UiLanguage::English => "Enter/Space: toggle | Left/Right: cycle service",
+        UiLanguage::Chinese => "Enter/空格: 切换 | 左/右: 切换服务",
     };
     lines.push(Line::from(vec![Span::styled(
         instructions,
@@ -460,6 +519,372 @@ fn draw_settings(f: &mut Frame, app: &App) {
         .alignment(Alignment::Left);
 
     f.render_widget(settings_block, popup_area);
+}
+
+fn draw_transcription_header(f: &mut Frame, app: &App, area: Rect) {
+    let title = match app.ui_language {
+        UiLanguage::English => "Transcription Mode",
+        UiLanguage::Chinese => "转录模式",
+    };
+
+    let lang_text = format!("[{}]", app.transcription.language.name());
+    let device_display = match &app.transcription.selected_device {
+        Some(name) => app
+            .transcription
+            .available_devices
+            .iter()
+            .find(|d| d.name == *name)
+            .map(|d| d.description.as_str())
+            .unwrap_or(name.as_str()),
+        None => "Default",
+    };
+    let device_text = format!("[{}]", device_display);
+    let model_text = format!("[{}]", app.transcription.model_size.name());
+
+    let header_spans = vec![
+        Span::styled(
+            title,
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(lang_text, Style::default().fg(Color::Cyan)),
+        Span::raw("  "),
+        Span::styled(device_text, Style::default().fg(Color::Green)),
+        Span::raw("  "),
+        Span::styled(model_text, Style::default().fg(Color::Yellow)),
+    ];
+
+    let header = Paragraph::new(Line::from(header_spans))
+        .alignment(Alignment::Center)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Magenta)),
+        );
+
+    f.render_widget(header, area);
+}
+
+fn draw_transcript(f: &mut Frame, app: &App, area: Rect) {
+    let label = match app.ui_language {
+        UiLanguage::English => "Transcript",
+        UiLanguage::Chinese => "转录内容",
+    };
+
+    let content = if app.transcription.transcript.is_empty() {
+        match app.ui_language {
+            UiLanguage::English => "Transcribed text will appear here...".to_string(),
+            UiLanguage::Chinese => "转录的文字将显示在这里...".to_string(),
+        }
+    } else {
+        app.transcription.transcript.clone()
+    };
+
+    let style = if app.transcription.transcript.is_empty() {
+        Style::default().fg(Color::Gray)
+    } else {
+        Style::default().fg(Color::White)
+    };
+
+    let transcript = Paragraph::new(Span::styled(content, style))
+        .block(
+            Block::default()
+                .title(label)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Blue)),
+        )
+        .wrap(Wrap { trim: false })
+        .scroll((app.transcription.transcript_scroll, 0));
+
+    f.render_widget(transcript, area);
+}
+
+fn draw_transcription_pinyin(f: &mut Frame, app: &App, area: Rect) {
+    let label = match app.ui_language {
+        UiLanguage::English => "Pinyin",
+        UiLanguage::Chinese => "拼音",
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    if app.transcription.pinyin_lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            match app.ui_language {
+                UiLanguage::English => "Pinyin will appear here...",
+                UiLanguage::Chinese => "拼音将显示在这里...",
+            },
+            Style::default().fg(Color::Gray),
+        )));
+    } else {
+        for (pinyin, hanzi) in app
+            .transcription
+            .pinyin_lines
+            .iter()
+            .zip(app.transcription.hanzi_lines.iter())
+        {
+            lines.push(Line::from(Span::styled(
+                pinyin.clone(),
+                Style::default()
+                    .fg(Color::LightBlue)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(Span::styled(
+                hanzi.clone(),
+                Style::default().fg(Color::White),
+            )));
+        }
+    }
+
+    let widget = Paragraph::new(Text::from(lines))
+        .block(
+            Block::default()
+                .title(label)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Blue)),
+        )
+        .wrap(Wrap { trim: true });
+
+    f.render_widget(widget, area);
+}
+
+fn draw_transcription_translation(f: &mut Frame, app: &App, area: Rect) {
+    let label = match app.ui_language {
+        UiLanguage::English => "Translation",
+        UiLanguage::Chinese => "翻译",
+    };
+
+    let content = if app.transcription.translation.is_empty() {
+        match app.ui_language {
+            UiLanguage::English => "Translation will appear here...".to_string(),
+            UiLanguage::Chinese => "翻译将显示在这里...".to_string(),
+        }
+    } else {
+        app.transcription.translation.clone()
+    };
+
+    let style = if app.transcription.translation.is_empty() {
+        Style::default().fg(Color::Gray)
+    } else {
+        Style::default().fg(Color::White)
+    };
+
+    let widget = Paragraph::new(Span::styled(content, style))
+        .block(
+            Block::default()
+                .title(label)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Green)),
+        )
+        .wrap(Wrap { trim: true });
+
+    f.render_widget(widget, area);
+}
+
+fn draw_transcription_status(f: &mut Frame, app: &App, area: Rect) {
+    let recording_indicator = if app.transcription.is_recording {
+        Span::styled(
+            " [REC] ",
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(
+            " [STOP] ",
+            Style::default().fg(Color::Gray),
+        )
+    };
+
+    let vad_indicator = if app.transcription.is_recording {
+        if app.transcription.vad_active {
+            Span::styled(" [VOICE] ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+        } else {
+            Span::styled(" [SILENCE] ", Style::default().fg(Color::DarkGray))
+        }
+    } else {
+        Span::raw("")
+    };
+
+    let status_text = if app.transcription.model_loading {
+        let pct = (app.transcription.model_progress * 100.0) as u32;
+        format!("{} ({}%)", app.transcription.status, pct)
+    } else {
+        app.transcription.status.clone()
+    };
+
+    let spans = vec![
+        recording_indicator,
+        vad_indicator,
+        Span::raw("  "),
+        Span::styled(status_text, Style::default().fg(Color::Gray)),
+    ];
+
+    let status = Paragraph::new(Line::from(spans)).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray)),
+    );
+
+    f.render_widget(status, area);
+}
+
+fn draw_device_selector(f: &mut Frame, app: &App) {
+    let popup_area = centered_rect(70, 60, f.area());
+    f.render_widget(Clear, popup_area);
+
+    let title = match app.ui_language {
+        UiLanguage::English => "Select Audio Device",
+        UiLanguage::Chinese => "选择音频设备",
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    if app.transcription.available_devices.is_empty() {
+        let msg = match app.ui_language {
+            UiLanguage::English => "No audio input devices found",
+            UiLanguage::Chinese => "未找到音频输入设备",
+        };
+        lines.push(Line::from(Span::styled(msg, Style::default().fg(Color::Red))));
+    } else {
+        let visible_count = (popup_area.height as usize).saturating_sub(4);
+        let scroll = app.transcription.device_selector_scroll;
+        let total = app.transcription.available_devices.len();
+        let start = scroll.saturating_sub(visible_count / 2);
+        let end = (start + visible_count).min(total);
+
+        for (idx, device) in app
+            .transcription
+            .available_devices
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(end - start)
+        {
+            let is_selected = idx == scroll;
+            let is_current = app
+                .transcription
+                .selected_device
+                .as_deref()
+                == Some(device.name.as_str());
+
+            let arrow = if is_selected { "> " } else { "  " };
+            let check = if is_current { " [current]" } else { "" };
+
+            let style = if is_selected {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else if is_current {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(Color::White)
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(arrow, style),
+                Span::styled(format!("{}{}", device.description, check), style),
+            ]));
+        }
+
+        if total > visible_count {
+            lines.push(Line::from(Span::styled(
+                format!("{} / {}", scroll + 1, total),
+                Style::default().fg(Color::Gray),
+            )));
+        }
+    }
+
+    let widget = Paragraph::new(Text::from(lines))
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .alignment(Alignment::Left);
+
+    f.render_widget(widget, popup_area);
+}
+
+fn draw_transcription_settings(f: &mut Frame, app: &App) {
+    let popup_area = centered_rect(60, 40, f.area());
+    f.render_widget(Clear, popup_area);
+
+    let title = match app.ui_language {
+        UiLanguage::English => "Transcription Settings",
+        UiLanguage::Chinese => "转录设置",
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Language setting
+    let lang_label = match app.ui_language {
+        UiLanguage::English => "Language",
+        UiLanguage::Chinese => "语言",
+    };
+    let is_sel = app.transcription.settings_selection == 0;
+    let style = if is_sel {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    let arrow = if is_sel { "> " } else { "  " };
+    lines.push(Line::from(vec![
+        Span::styled(arrow, style),
+        Span::styled(
+            format!("{}: < {} >", lang_label, app.transcription.language.name()),
+            style,
+        ),
+    ]));
+
+    // Model setting
+    let model_label = match app.ui_language {
+        UiLanguage::English => "Whisper Model",
+        UiLanguage::Chinese => "Whisper 模型",
+    };
+    let is_sel = app.transcription.settings_selection == 1;
+    let style = if is_sel {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    let arrow = if is_sel { "> " } else { "  " };
+    lines.push(Line::from(vec![
+        Span::styled(arrow, style),
+        Span::styled(
+            format!("{}: < {} >", model_label, app.transcription.model_size.name()),
+            style,
+        ),
+    ]));
+
+    lines.push(Line::from(vec![]));
+
+    let instructions = match app.ui_language {
+        UiLanguage::English => "Left/Right: cycle | Esc: close",
+        UiLanguage::Chinese => "左/右: 切换 | Esc: 关闭",
+    };
+    lines.push(Line::from(Span::styled(
+        instructions,
+        Style::default().fg(Color::Gray),
+    )));
+
+    let widget = Paragraph::new(Text::from(lines))
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .alignment(Alignment::Left);
+
+    f.render_widget(widget, popup_area);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {

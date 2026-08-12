@@ -191,6 +191,43 @@ fn wrapped_lines_stay_within_the_width_budget() {
 }
 
 #[test]
+fn punctuation_heavy_lines_stay_within_the_width_budget() {
+    // Regression: wrapping budgets each token with get_token_display_width,
+    // but the line is rendered by build_line. These once disagreed about the
+    // width of Chinese punctuation - one column against two - so a line of
+    // 20 such tokens was budgeted at 80 columns and rendered at 99, wrapping
+    // in the terminal and destroying the pinyin/hanzi alignment.
+    let input = "你，".repeat(20);
+    let lines = convert_to_pinyin_lines(&input);
+
+    for (i, line) in lines.iter().enumerate() {
+        assert!(
+            display_width(&line.hanzi) <= 80,
+            "line {i} renders {} columns wide, over the 80-column budget:\n{:?}",
+            display_width(&line.hanzi),
+            line.hanzi
+        );
+    }
+}
+
+#[test]
+fn ascii_punctuation_is_budgeted_as_one_column() {
+    // ASCII punctuation attached to hanzi is half the width of its full-width
+    // counterpart, so it must not be over-budgeted either.
+    let input = "你,".repeat(25);
+    let lines = convert_to_pinyin_lines(&input);
+
+    for (i, line) in lines.iter().enumerate() {
+        assert!(
+            display_width(&line.hanzi) <= 80,
+            "line {i} renders {} columns wide:\n{:?}",
+            display_width(&line.hanzi),
+            line.hanzi
+        );
+    }
+}
+
+#[test]
 fn a_single_oversized_token_is_not_dropped() {
     let long_word = "a".repeat(200);
     let lines = convert_to_pinyin_lines(&long_word);

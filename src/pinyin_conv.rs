@@ -114,11 +114,7 @@ fn build_line(tokens: &[Token]) -> PinyinLine {
     for token in tokens {
         let (pinyin_str, hanzi_str, display_width) = match token {
             Token::Chinese { hanzi, pinyin } => {
-                // Calculate display width: Chinese chars take 2 columns, punctuation takes 1
-                let chinese_count = hanzi.chars().filter(|c| is_chinese(*c)).count();
-                let punct_count = hanzi.chars().filter(|c| is_punctuation(*c)).count();
-                let display_width = chinese_count * 2 + punct_count * 2; // Chinese = 2 cols, punct = 1 col
-                (pinyin.clone(), hanzi.clone(), display_width)
+                (pinyin.clone(), hanzi.clone(), display_width_of(hanzi))
             }
             Token::English(word) => {
                 let display_width = word.chars().count(); // ASCII chars take 1 column each
@@ -187,17 +183,39 @@ fn get_token_display_width(token: &Token) -> usize {
             // Width is max of pinyin length and hanzi display width
             // Plus 1 for the space separator between columns
             let pinyin_len = pinyin.chars().count();
-            // Calculate display width: Chinese chars take 2 columns, punctuation takes 1
-            let chinese_count = hanzi.chars().filter(|c| is_chinese(*c)).count();
-            let punct_count = hanzi.chars().filter(|c| is_punctuation(*c)).count();
-            let hanzi_display = chinese_count * 2 + punct_count;
-            pinyin_len.max(hanzi_display) + 1
+            pinyin_len.max(display_width_of(hanzi)) + 1
         }
         Token::English(word) => {
             // English word width is its character count
             // Plus 1 for the space separator between columns
             word.chars().count() + 1
         }
+    }
+}
+
+/// Terminal columns a hanzi token occupies.
+///
+/// Both the line-wrapping budget and the column builder measure tokens with
+/// this, so a token cannot be budgeted one width and then rendered at another.
+fn display_width_of(text: &str) -> usize {
+    text.chars().map(char_display_width).sum()
+}
+
+/// Terminal columns a single character occupies.
+///
+/// Full-width forms take two columns; everything else takes one. Note that
+/// `is_punctuation` matches both scripts, so Chinese punctuation such as `，`
+/// is two columns wide while ASCII `,` is one.
+fn char_display_width(c: char) -> usize {
+    let full_width = is_chinese(c)
+        || ('\u{3000}'..='\u{303f}').contains(&c) // CJK symbols and punctuation
+        || ('\u{ff01}'..='\u{ff60}').contains(&c) // Full-width ASCII forms
+        || ('\u{ffe0}'..='\u{ffe6}').contains(&c); // Full-width symbols
+
+    if full_width {
+        2
+    } else {
+        1
     }
 }
 
@@ -403,6 +421,38 @@ mod tests {
 
         // max(pinyin 3, hanzi 2) + 1 separator.
         assert_eq!(get_token_display_width(&token), 4);
+    }
+
+    #[test]
+    fn char_width_distinguishes_full_width_from_ascii_punctuation() {
+        assert_eq!(char_display_width('中'), 2);
+        assert_eq!(char_display_width('，'), 2);
+        assert_eq!(char_display_width('。'), 2);
+        assert_eq!(char_display_width('！'), 2);
+
+        assert_eq!(char_display_width(','), 1);
+        assert_eq!(char_display_width('.'), 1);
+        assert_eq!(char_display_width('a'), 1);
+    }
+
+    #[test]
+    fn the_wrap_budget_and_the_renderer_agree_on_width() {
+        // These two once disagreed about punctuation, so lines were budgeted
+        // narrower than they rendered.
+        for text in ["你", "你，", "你,", "中国", "中文。测试！"] {
+            let tokens = tokenize(text);
+            let budgeted: usize = tokens.iter().map(get_token_display_width).sum();
+            let line = build_line(&tokens);
+
+            // The budget includes one separator per token; the rendered line
+            // has its trailing padding trimmed, so it can only be narrower.
+            assert!(
+                display_width_of(&line.hanzi) <= budgeted,
+                "{text:?} was budgeted {budgeted} columns but rendered {} in {:?}",
+                display_width_of(&line.hanzi),
+                line.hanzi
+            );
+        }
     }
 
     #[test]

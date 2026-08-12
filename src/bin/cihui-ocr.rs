@@ -9,6 +9,8 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use cihui_tui::app::{App, InputMode};
+use cihui_tui::image_source::{extract_image_source, ImageSource};
+use cihui_tui::keys::{handle_language_selector_input, handle_settings_input};
 use cihui_tui::ltengine;
 use cihui_tui::ocr;
 use cihui_tui::pinyin_conv;
@@ -77,12 +79,12 @@ async fn run_app<W: io::Write>(
             event_result = async { crossterm::event::poll(timeout).map(|ready| if ready { event::read().ok() } else { None }) } => {
                 if let Ok(Some(Event::Key(key))) = event_result {
                     if app.language_selector_open {
-                        handle_language_selector_input(app, key).await;
+                        handle_language_selector_input(app, key);
                         continue;
                     }
 
                     if app.settings_open {
-                        handle_settings_input(app, key).await;
+                        handle_settings_input(app, key);
                         continue;
                     }
 
@@ -231,58 +233,6 @@ async fn run_app<W: io::Write>(
     }
 }
 
-async fn handle_settings_input(app: &mut App, key: crossterm::event::KeyEvent) {
-    match key.code {
-        KeyCode::Esc => {
-            app.toggle_settings();
-        }
-        KeyCode::Up => {
-            app.settings_move_up();
-        }
-        KeyCode::Down => {
-            app.settings_move_down();
-        }
-        KeyCode::Enter | KeyCode::Char(' ') => {
-            app.settings_select();
-        }
-        KeyCode::Left => {
-            if app.settings_selection == 1 {
-                app.cycle_translation_service_backward();
-            }
-        }
-        KeyCode::Right => {
-            if app.settings_selection == 1 {
-                app.cycle_translation_service_forward();
-            }
-        }
-        _ => {}
-    }
-}
-
-async fn handle_language_selector_input(app: &mut App, key: crossterm::event::KeyEvent) {
-    match key.code {
-        KeyCode::Esc => {
-            app.toggle_language_selector();
-        }
-        KeyCode::Up => {
-            app.language_selector_move_up();
-        }
-        KeyCode::Down => {
-            app.language_selector_move_down();
-        }
-        KeyCode::Enter => {
-            app.language_selector_select();
-        }
-        KeyCode::Char(c) => {
-            app.language_selector_search_add_char(c);
-        }
-        KeyCode::Backspace => {
-            app.language_selector_search_backspace();
-        }
-        _ => {}
-    }
-}
-
 async fn handle_clipboard_paste(app: &mut App) -> anyhow::Result<()> {
     use arboard::Clipboard;
 
@@ -394,105 +344,6 @@ async fn try_external_clipboard_image() -> anyhow::Result<Option<Vec<u8>>> {
     }
     
     Ok(None)
-}
-
-fn extract_image_source(text: &str) -> Option<ImageSource> {
-    let trimmed = text.trim();
-    
-    if let Some(src) = extract_html_img_src(trimmed) {
-        return Some(ImageSource::PathOrUrl(src));
-    }
-
-    if let Some(src) = extract_markdown_image(trimmed) {
-        return Some(ImageSource::PathOrUrl(src));
-    }
-
-    if trimmed.starts_with("file://") && is_image_path(trimmed) {
-        return Some(ImageSource::Path(trimmed.to_string()));
-    }
-
-    if is_image_url(trimmed) {
-        return Some(ImageSource::Url(trimmed.to_string()));
-    }
-
-    if is_image_path(trimmed) {
-        return Some(ImageSource::Path(trimmed.to_string()));
-    }
-
-    None
-}
-
-#[derive(Debug)]
-enum ImageSource {
-    Path(String),
-    Url(String),
-    PathOrUrl(String),
-}
-
-fn extract_html_img_src(text: &str) -> Option<String> {
-    let text_lower = text.to_lowercase();
-    if let Some(img_idx) = text_lower.find("<img") {
-        let after_img = &text[img_idx..];
-        if let Some(src_start) = after_img.to_lowercase().find("src=\"") {
-            let after_src = &after_img[src_start + 5..];
-            if let Some(src_end) = after_src.find('"') {
-                return Some(after_src[..src_end].to_string());
-            }
-        }
-        if let Some(src_start) = after_img.to_lowercase().find("src='") {
-            let after_src = &after_img[src_start + 5..];
-            if let Some(src_end) = after_src.find('\'') {
-                return Some(after_src[..src_end].to_string());
-            }
-        }
-    }
-    None
-}
-
-fn extract_markdown_image(text: &str) -> Option<String> {
-    if text.starts_with("![") {
-        if let Some(start) = text.find("](") {
-            let after_paren = &text[start + 2..];
-            if let Some(end) = after_paren.find(')') {
-                return Some(after_paren[..end].to_string());
-            }
-        }
-    }
-    None
-}
-
-fn is_image_url(text: &str) -> bool {
-    (text.starts_with("http://") 
-        || text.starts_with("https://")
-        || text.starts_with("file://"))
-        && text.chars().any(|c| c == '.')
-        && text.split('.').last().map_or(false, |ext| {
-            matches!(
-                ext.to_lowercase().as_str(),
-                "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tiff"
-            )
-        })
-}
-
-fn is_image_path(text: &str) -> bool {
-    let trimmed = text.trim();
-    
-    if !trimmed.chars().any(|c| c == '/' || c == '\\' || c == '.') {
-        return false;
-    }
-    
-    if trimmed.starts_with("file://") {
-        return true;
-    }
-    
-    let has_image_ext = trimmed.split('.').last().map_or(false, |ext| {
-        matches!(
-            ext.to_lowercase().as_str(),
-            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tiff"
-        )
-    });
-    
-    has_image_ext
 }
 
 async fn process_image_from_source(source: ImageSource) -> anyhow::Result<ocr::OcrResult> {

@@ -342,6 +342,55 @@ impl App {
         self.save_config();
     }
 
+    /// Fold a transcription event into the app state.
+    ///
+    /// Returns the full transcript when it has grown and therefore needs
+    /// re-translating, so the caller can do the async work; every other event
+    /// is handled entirely here.
+    #[cfg(feature = "transcription")]
+    pub fn apply_transcription_event(
+        &mut self,
+        event: crate::transcription::TranscriptionEvent,
+    ) -> Option<String> {
+        use crate::transcription::TranscriptionEvent;
+
+        match event {
+            TranscriptionEvent::ModelLoading { progress, status } => {
+                self.transcription.model_loading = true;
+                self.transcription.model_progress = progress;
+                self.transcription.status = status;
+                None
+            }
+            TranscriptionEvent::ModelReady => {
+                self.transcription.model_loading = false;
+                self.transcription.model_ready = true;
+                self.transcription.status = "Model ready. Press Space to record.".into();
+                None
+            }
+            TranscriptionEvent::Segment(text) => {
+                // Segments arrive without separators; join them with a space
+                // unless the transcript already ends with whitespace.
+                if !self.transcription.transcript.is_empty()
+                    && !self.transcription.transcript.ends_with(' ')
+                    && !self.transcription.transcript.ends_with('\n')
+                {
+                    self.transcription.transcript.push(' ');
+                }
+                self.transcription.transcript.push_str(text.trim());
+                Some(self.transcription.transcript.clone())
+            }
+            TranscriptionEvent::VadActivity(active) => {
+                self.transcription.vad_active = active;
+                None
+            }
+            TranscriptionEvent::Error(e) => {
+                self.transcription.status = format!("Error: {}", e);
+                self.transcription.is_recording = false;
+                None
+            }
+        }
+    }
+
     /// Snapshot the app's current settings as a `Config`.
     pub fn to_config(&self) -> Config {
         Config {

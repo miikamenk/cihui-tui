@@ -228,14 +228,3 @@ pub async fn recognize_image_from_rgba(
 
     Ok(OcrResult { text })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    #[test]
-    fn test_is_image_path() {
-        assert!(Path::new("test.png").extension().is_some());
-        assert!(Path::new("test.jpg").extension().is_some());
-    }
-}

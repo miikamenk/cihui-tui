@@ -14,6 +14,7 @@ use whisper_rs::WhisperContext;
 
 use cihui_tui::app::App;
 use cihui_tui::config::TranslationService;
+use cihui_tui::keys::{handle_device_selector_input, handle_transcription_settings_input};
 use cihui_tui::ltengine;
 use cihui_tui::pinyin_conv;
 use cihui_tui::transcription::{self, TranscriptionEvent};
@@ -88,39 +89,11 @@ async fn run_app<W: io::Write>(
             }
 
             Some(event) = transcription_rx.recv() => {
-                match event {
-                    TranscriptionEvent::ModelLoading { progress, status } => {
-                        app.transcription.model_loading = true;
-                        app.transcription.model_progress = progress;
-                        app.transcription.status = status;
-                    }
-                    TranscriptionEvent::ModelReady => {
-                        app.transcription.model_loading = false;
-                        app.transcription.model_ready = true;
-                        app.transcription.status = "Model ready. Press Space to record.".into();
-                    }
-                    TranscriptionEvent::Segment(text) => {
-                        if !app.transcription.transcript.is_empty()
-                            && !app.transcription.transcript.ends_with(' ')
-                            && !app.transcription.transcript.ends_with('\n')
-                        {
-                            app.transcription.transcript.push(' ');
-                        }
-                        app.transcription.transcript.push_str(text.trim());
-
-                        let full_text = app.transcription.transcript.clone();
-                        let target_lang = app.target_language;
-                        let service = app.translation_service;
-                        let local_url = app.local_translate_url.clone();
-                        process_transcription_text(app, &full_text, target_lang, service, &local_url, &mut ltengine).await;
-                    }
-                    TranscriptionEvent::VadActivity(active) => {
-                        app.transcription.vad_active = active;
-                    }
-                    TranscriptionEvent::Error(e) => {
-                        app.transcription.status = format!("Error: {}", e);
-                        app.transcription.is_recording = false;
-                    }
+                if let Some(full_text) = app.apply_transcription_event(event) {
+                    let target_lang = app.target_language;
+                    let service = app.translation_service;
+                    let local_url = app.local_translate_url.clone();
+                    process_transcription_text(app, &full_text, target_lang, service, &local_url, &mut ltengine).await;
                 }
             }
 
@@ -257,56 +230,6 @@ fn stop_transcription(
     app.transcription.vad_active = false;
     if app.transcription.model_ready {
         app.transcription.status = "Stopped. Press Space to record.".into();
-    }
-}
-
-fn handle_device_selector_input(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
-    match key.code {
-        KeyCode::Esc => {
-            app.transcription.device_selector_open = false;
-            false
-        }
-        KeyCode::Up => {
-            if app.transcription.device_selector_scroll > 0 {
-                app.transcription.device_selector_scroll -= 1;
-            }
-            false
-        }
-        KeyCode::Down => {
-            let max = app.transcription.available_devices.len().saturating_sub(1);
-            if app.transcription.device_selector_scroll < max {
-                app.transcription.device_selector_scroll += 1;
-            }
-            false
-        }
-        KeyCode::Enter => {
-            let old_device = app.transcription.selected_device.clone();
-            app.transcription_device_select();
-            // Return true if device changed
-            old_device != app.transcription.selected_device
-        }
-        _ => false,
-    }
-}
-
-fn handle_transcription_settings_input(app: &mut App, key: crossterm::event::KeyEvent) {
-    match key.code {
-        KeyCode::Esc => {
-            app.transcription.settings_open = false;
-        }
-        KeyCode::Up => {
-            app.transcription_settings_move_up();
-        }
-        KeyCode::Down => {
-            app.transcription_settings_move_down();
-        }
-        KeyCode::Left => {
-            app.transcription_settings_cycle_backward();
-        }
-        KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
-            app.transcription_settings_cycle_forward();
-        }
-        _ => {}
     }
 }
 

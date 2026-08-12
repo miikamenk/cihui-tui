@@ -560,3 +560,132 @@ impl WhisperModelSize {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---------------------------------------------------------- resample --
+
+    #[test]
+    fn resampling_to_the_same_rate_is_a_no_op() {
+        let samples = vec![0.0, 0.25, 0.5, 0.75, 1.0];
+
+        let out = resample(&samples, 16_000, 16_000);
+
+        assert_eq!(out.len(), samples.len());
+        for (i, (a, b)) in out.iter().zip(samples.iter()).enumerate() {
+            assert!((a - b).abs() < 1e-6, "sample {i} changed: {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn downsampling_halves_the_sample_count() {
+        // The capture device usually runs at 44.1 or 48 kHz and whisper wants
+        // 16 kHz, so this path runs on every chunk of audio.
+        let samples = vec![0.0; 480];
+
+        let out = resample(&samples, 48_000, 24_000);
+
+        assert_eq!(out.len(), 240);
+    }
+
+    #[test]
+    fn upsampling_grows_the_sample_count() {
+        let samples = vec![0.0; 100];
+
+        let out = resample(&samples, 8_000, 16_000);
+
+        assert_eq!(out.len(), 200);
+    }
+
+    #[test]
+    fn resampling_48k_to_16k_gives_a_third_of_the_samples() {
+        let samples = vec![0.5; 4800];
+
+        let out = resample(&samples, 48_000, 16_000);
+
+        assert_eq!(out.len(), 1600);
+    }
+
+    #[test]
+    fn resampling_interpolates_between_neighbours() {
+        // Doubling the rate should put a midpoint between each pair.
+        let out = resample(&[0.0, 1.0], 8_000, 16_000);
+
+        assert_eq!(out.len(), 4);
+        assert!((out[0] - 0.0).abs() < 1e-6);
+        assert!(
+            (out[1] - 0.5).abs() < 1e-6,
+            "expected a midpoint, got {}",
+            out[1]
+        );
+    }
+
+    #[test]
+    fn resampling_preserves_a_constant_signal() {
+        let samples = vec![0.3_f32; 1000];
+
+        let out = resample(&samples, 44_100, 16_000);
+
+        for (i, s) in out.iter().enumerate() {
+            assert!((s - 0.3).abs() < 1e-5, "sample {i} drifted to {s}");
+        }
+    }
+
+    #[test]
+    fn resampling_empty_input_gives_empty_output() {
+        assert!(resample(&[], 48_000, 16_000).is_empty());
+    }
+
+    #[test]
+    fn resampling_a_single_sample_does_not_panic() {
+        let out = resample(&[1.0], 48_000, 16_000);
+
+        assert!(out.len() <= 1);
+    }
+
+    // ------------------------------------------------------------ mapping --
+
+    #[test]
+    fn language_codes_match_whisper_names() {
+        assert_eq!(
+            whisper_language_code(TranscriptionLanguage::English),
+            Some("en")
+        );
+        assert_eq!(
+            whisper_language_code(TranscriptionLanguage::Chinese),
+            Some("zh")
+        );
+        assert_eq!(
+            whisper_language_code(TranscriptionLanguage::Auto),
+            None,
+            "Auto must be None so whisper detects the language itself"
+        );
+    }
+
+    #[test]
+    fn every_model_size_maps_to_a_distinct_ggml_file() {
+        let sizes = [
+            WhisperModelSize::Tiny,
+            WhisperModelSize::Base,
+            WhisperModelSize::Medium,
+            WhisperModelSize::LargeV3Turbo,
+        ];
+
+        let mut files = Vec::new();
+        for size in sizes {
+            let (repo, file) = model_repo_file(size);
+
+            assert_eq!(repo, "ggerganov/whisper.cpp");
+            assert!(file.starts_with("ggml-"), "{size:?} maps to {file}");
+            assert!(file.ends_with(".bin"), "{size:?} maps to {file}");
+            files.push(file);
+        }
+
+        files.sort_unstable();
+        let count = files.len();
+        files.dedup();
+        assert_eq!(files.len(), count, "two model sizes share a file");
+    }
+}

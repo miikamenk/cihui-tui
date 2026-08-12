@@ -1,0 +1,19 @@
+---
+source: tests/ui_snapshot_tests.rs
+expression: "render_sized(&app, 40, 15).backend()"
+---
+"┌──────────────────────────────────────┐"
+"│Cihui - Chinese Vocabulary Tool  [TEXT│"
+"└──────────────────────────────────────┘"
+"┌Input─────────────────────────────────┐"
+"└──────────────────────────────────────┘"
+"┌Pinyin────────────────────────────────┐"
+"│Pinyin will appear above Chinese      │"
+"│characters                            │"
+"└──────────────────────────────────────┘"
+"┌Translation───────────────────────────┐"
+"│Translation will appear here...       │"
+"│                                      │"
+"└──────────────────────────────────────┘"
+"Ctrl+L: Language | Ctrl+A: Select All | "
+"                                        "

@@ -10,20 +10,10 @@ use crate::app::{App, AppMode, InputMode, UiLanguage};
 use crate::pinyin_conv::PinyinLine;
 
 pub fn draw_ui(f: &mut Frame, app: &App) {
-    #[cfg(all(feature = "ocr", feature = "transcription"))]
-    {
-        match app.mode {
-            AppMode::Normal => draw_normal_mode(f, app),
-            AppMode::Transcription => draw_transcription_mode(f, app),
-        }
-    }
-    #[cfg(all(feature = "ocr", not(feature = "transcription")))]
-    {
-        draw_normal_mode(f, app)
-    }
-    #[cfg(all(not(feature = "ocr"), feature = "transcription"))]
-    {
-        draw_transcription_mode(f, app)
+    match app.mode {
+        AppMode::Normal => draw_normal_mode(f, app),
+        #[cfg(feature = "transcription")]
+        AppMode::Transcription => draw_transcription_mode(f, app),
     }
 }
 

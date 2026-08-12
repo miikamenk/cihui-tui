@@ -4,10 +4,11 @@ use crate::transcription::{TranscriptionLanguage, WhisperModelSize};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub enum TranslationService {
+    #[default]
     Auto,
     Google,
     MyMemory,
@@ -88,12 +89,6 @@ fn default_ltengine_path() -> String {
     "ltengine".to_string()
 }
 
-impl Default for TranslationService {
-    fn default() -> Self {
-        TranslationService::Auto
-    }
-}
-
 impl Default for Config {
     #[cfg(feature = "transcription")]
     fn default() -> Self {
@@ -123,27 +118,33 @@ impl Default for Config {
 
 impl Config {
     pub fn load() -> Result<Self> {
-        let config_path = Self::config_path()?;
+        Self::load_from(&Self::config_path()?)
+    }
 
-        if !config_path.exists() {
+    /// Load a config from an explicit path. Returns the defaults if the file
+    /// does not exist, and an error if it exists but cannot be parsed.
+    pub fn load_from(path: &Path) -> Result<Self> {
+        if !path.exists() {
             return Ok(Self::default());
         }
 
-        let content = fs::read_to_string(&config_path)?;
+        let content = fs::read_to_string(path)?;
         let config: Config = serde_json::from_str(&content)?;
         Ok(config)
     }
 
     pub fn save(&self) -> Result<()> {
-        let config_path = Self::config_path()?;
+        self.save_to(&Self::config_path()?)
+    }
 
-        // Create config directory if it doesn't exist
-        if let Some(parent) = config_path.parent() {
+    /// Write the config to an explicit path, creating parent directories.
+    pub fn save_to(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
 
         let content = serde_json::to_string_pretty(self)?;
-        fs::write(&config_path, content)?;
+        fs::write(path, content)?;
         Ok(())
     }
 

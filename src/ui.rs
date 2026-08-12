@@ -10,20 +10,10 @@ use crate::app::{App, AppMode, InputMode, UiLanguage};
 use crate::pinyin_conv::PinyinLine;
 
 pub fn draw_ui(f: &mut Frame, app: &App) {
-    #[cfg(all(feature = "ocr", feature = "transcription"))]
-    {
-        match app.mode {
-            AppMode::Normal => draw_normal_mode(f, app),
-            AppMode::Transcription => draw_transcription_mode(f, app),
-        }
-    }
-    #[cfg(all(feature = "ocr", not(feature = "transcription")))]
-    {
-        draw_normal_mode(f, app)
-    }
-    #[cfg(all(not(feature = "ocr"), feature = "transcription"))]
-    {
-        draw_transcription_mode(f, app)
+    match app.mode {
+        AppMode::Normal => draw_normal_mode(f, app),
+        #[cfg(feature = "transcription")]
+        AppMode::Transcription => draw_transcription_mode(f, app),
     }
 }
 
@@ -181,9 +171,12 @@ fn draw_input(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     if !app.processing && !app.settings_open && !app.language_selector_open {
         let inner_width = (area.width as usize).saturating_sub(2); // subtract borders
         let chars: Vec<char> = app.input.chars().collect();
+        // The index bounds the walk at the cursor, so this is a prefix scan
+        // rather than a plain iteration over the characters.
         let mut visual_row: u16 = 0;
         let mut visual_col: usize = 0;
 
+        #[allow(clippy::needless_range_loop)]
         for i in 0..app.cursor_position.min(chars.len()) {
             if chars[i] == '\n' {
                 visual_row += 1;
@@ -355,7 +348,7 @@ fn draw_language_selector(f: &mut Frame, app: &App) {
 
     // Separator
     lines.push(Line::from(vec![Span::styled(
-        "─".repeat(popup_area.width as usize - 2),
+        "─".repeat((popup_area.width as usize).saturating_sub(2)),
         Style::default().fg(Color::Gray),
     )]));
 
@@ -375,7 +368,7 @@ fn draw_language_selector(f: &mut Frame, app: &App) {
         .iter()
         .enumerate()
         .skip(start_idx)
-        .take(end_idx - start_idx)
+        .take(end_idx.saturating_sub(start_idx))
     {
         let is_selected = idx == scroll;
         let is_current = language == app.target_language;
@@ -784,7 +777,7 @@ fn draw_device_selector(f: &mut Frame, app: &App) {
             .iter()
             .enumerate()
             .skip(start)
-            .take(end - start)
+            .take(end.saturating_sub(start))
         {
             let is_selected = idx == scroll;
             let is_current =
@@ -950,7 +943,7 @@ fn is_wide_char(c: char) -> bool {
         || ('\u{20000}'..='\u{2a6df}').contains(&c)
         || ('\u{2a700}'..='\u{2b73f}').contains(&c)
         || ('\u{2b740}'..='\u{2b81f}').contains(&c)
-        || c == '\u{3000}'  // Full-width space
+        || ('\u{3000}'..='\u{303f}').contains(&c)  // CJK symbols and punctuation
         || ('\u{ff01}'..='\u{ff5e}').contains(&c)  // Full-width ASCII
         || ('\u{ff5f}'..='\u{ff60}').contains(&c)  // Full-width brackets
         || ('\u{ffe0}'..='\u{ffe6}').contains(&c) // Full-width symbols

@@ -1,5 +1,7 @@
 pub mod app;
 pub mod config;
+pub mod image_source;
+pub mod keys;
 pub mod language;
 pub mod ltengine;
 pub mod pinyin_conv;

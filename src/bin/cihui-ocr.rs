@@ -9,6 +9,8 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use cihui_tui::app::{App, InputMode};
+use cihui_tui::image_source::{extract_image_source, ImageSource};
+use cihui_tui::keys::{handle_language_selector_input, handle_settings_input};
 use cihui_tui::ltengine;
 use cihui_tui::ocr;
 use cihui_tui::pinyin_conv;
@@ -58,11 +60,8 @@ async fn run_app<W: io::Write>(
     let tick_rate = std::time::Duration::from_millis(250);
     let debounce_duration = std::time::Duration::from_millis(500);
 
-    let mut ltengine = ltengine::LTEngine::new(
-        5050,
-        app.ltengine_model.clone(),
-        app.ltengine_path.clone(),
-    );
+    let mut ltengine =
+        ltengine::LTEngine::new(5050, app.ltengine_model.clone(), app.ltengine_path.clone());
 
     loop {
         terminal.draw(|f| draw_ui(f, app))?;
@@ -77,12 +76,12 @@ async fn run_app<W: io::Write>(
             event_result = async { crossterm::event::poll(timeout).map(|ready| if ready { event::read().ok() } else { None }) } => {
                 if let Ok(Some(Event::Key(key))) = event_result {
                     if app.language_selector_open {
-                        handle_language_selector_input(app, key).await;
+                        handle_language_selector_input(app, key);
                         continue;
                     }
 
                     if app.settings_open {
-                        handle_settings_input(app, key).await;
+                        handle_settings_input(app, key);
                         continue;
                     }
 
@@ -231,58 +230,6 @@ async fn run_app<W: io::Write>(
     }
 }
 
-async fn handle_settings_input(app: &mut App, key: crossterm::event::KeyEvent) {
-    match key.code {
-        KeyCode::Esc => {
-            app.toggle_settings();
-        }
-        KeyCode::Up => {
-            app.settings_move_up();
-        }
-        KeyCode::Down => {
-            app.settings_move_down();
-        }
-        KeyCode::Enter | KeyCode::Char(' ') => {
-            app.settings_select();
-        }
-        KeyCode::Left => {
-            if app.settings_selection == 1 {
-                app.cycle_translation_service_backward();
-            }
-        }
-        KeyCode::Right => {
-            if app.settings_selection == 1 {
-                app.cycle_translation_service_forward();
-            }
-        }
-        _ => {}
-    }
-}
-
-async fn handle_language_selector_input(app: &mut App, key: crossterm::event::KeyEvent) {
-    match key.code {
-        KeyCode::Esc => {
-            app.toggle_language_selector();
-        }
-        KeyCode::Up => {
-            app.language_selector_move_up();
-        }
-        KeyCode::Down => {
-            app.language_selector_move_down();
-        }
-        KeyCode::Enter => {
-            app.language_selector_select();
-        }
-        KeyCode::Char(c) => {
-            app.language_selector_search_add_char(c);
-        }
-        KeyCode::Backspace => {
-            app.language_selector_search_backspace();
-        }
-        _ => {}
-    }
-}
-
 async fn handle_clipboard_paste(app: &mut App) -> anyhow::Result<()> {
     use arboard::Clipboard;
 
@@ -315,7 +262,7 @@ async fn handle_clipboard_paste(app: &mut App) -> anyhow::Result<()> {
                     _ => {}
                 }
             }
-            
+
             match clipboard.get_text() {
                 Ok(text) => {
                     let trimmed = text.trim();
@@ -344,155 +291,56 @@ async fn handle_clipboard_paste(app: &mut App) -> anyhow::Result<()> {
 #[cfg(target_os = "linux")]
 async fn try_external_clipboard_image() -> anyhow::Result<Option<Vec<u8>>> {
     use tokio::process::Command;
-    
+
     let output = Command::new("wl-paste")
         .args(&["--type", "image/png"])
         .output()
         .await;
-    
+
     match output {
         Ok(result) if result.status.success() && !result.stdout.is_empty() => {
             return Ok(Some(result.stdout));
         }
         _ => {}
     }
-    
+
     let output = Command::new("xclip")
         .args(&["-selection", "clipboard", "-t", "image/png", "-o"])
         .output()
         .await;
-    
+
     match output {
         Ok(result) if result.status.success() && !result.stdout.is_empty() => {
             return Ok(Some(result.stdout));
         }
         _ => {}
     }
-    
+
     let output = Command::new("xclip")
         .args(&["-selection", "clipboard", "-t", "image/jpeg", "-o"])
         .output()
         .await;
-    
+
     match output {
         Ok(result) if result.status.success() && !result.stdout.is_empty() => {
             return Ok(Some(result.stdout));
         }
         _ => {}
     }
-    
+
     let output = Command::new("xclip")
         .args(&["-selection", "clipboard", "-t", "image/bmp", "-o"])
         .output()
         .await;
-    
+
     match output {
         Ok(result) if result.status.success() && !result.stdout.is_empty() => {
             return Ok(Some(result.stdout));
         }
         _ => {}
     }
-    
+
     Ok(None)
-}
-
-fn extract_image_source(text: &str) -> Option<ImageSource> {
-    let trimmed = text.trim();
-    
-    if let Some(src) = extract_html_img_src(trimmed) {
-        return Some(ImageSource::PathOrUrl(src));
-    }
-
-    if let Some(src) = extract_markdown_image(trimmed) {
-        return Some(ImageSource::PathOrUrl(src));
-    }
-
-    if trimmed.starts_with("file://") && is_image_path(trimmed) {
-        return Some(ImageSource::Path(trimmed.to_string()));
-    }
-
-    if is_image_url(trimmed) {
-        return Some(ImageSource::Url(trimmed.to_string()));
-    }
-
-    if is_image_path(trimmed) {
-        return Some(ImageSource::Path(trimmed.to_string()));
-    }
-
-    None
-}
-
-#[derive(Debug)]
-enum ImageSource {
-    Path(String),
-    Url(String),
-    PathOrUrl(String),
-}
-
-fn extract_html_img_src(text: &str) -> Option<String> {
-    let text_lower = text.to_lowercase();
-    if let Some(img_idx) = text_lower.find("<img") {
-        let after_img = &text[img_idx..];
-        if let Some(src_start) = after_img.to_lowercase().find("src=\"") {
-            let after_src = &after_img[src_start + 5..];
-            if let Some(src_end) = after_src.find('"') {
-                return Some(after_src[..src_end].to_string());
-            }
-        }
-        if let Some(src_start) = after_img.to_lowercase().find("src='") {
-            let after_src = &after_img[src_start + 5..];
-            if let Some(src_end) = after_src.find('\'') {
-                return Some(after_src[..src_end].to_string());
-            }
-        }
-    }
-    None
-}
-
-fn extract_markdown_image(text: &str) -> Option<String> {
-    if text.starts_with("![") {
-        if let Some(start) = text.find("](") {
-            let after_paren = &text[start + 2..];
-            if let Some(end) = after_paren.find(')') {
-                return Some(after_paren[..end].to_string());
-            }
-        }
-    }
-    None
-}
-
-fn is_image_url(text: &str) -> bool {
-    (text.starts_with("http://") 
-        || text.starts_with("https://")
-        || text.starts_with("file://"))
-        && text.chars().any(|c| c == '.')
-        && text.split('.').last().map_or(false, |ext| {
-            matches!(
-                ext.to_lowercase().as_str(),
-                "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tiff"
-            )
-        })
-}
-
-fn is_image_path(text: &str) -> bool {
-    let trimmed = text.trim();
-    
-    if !trimmed.chars().any(|c| c == '/' || c == '\\' || c == '.') {
-        return false;
-    }
-    
-    if trimmed.starts_with("file://") {
-        return true;
-    }
-    
-    let has_image_ext = trimmed.split('.').last().map_or(false, |ext| {
-        matches!(
-            ext.to_lowercase().as_str(),
-            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tiff"
-        )
-    });
-    
-    has_image_ext
 }
 
 async fn process_image_from_source(source: ImageSource) -> anyhow::Result<ocr::OcrResult> {
@@ -503,7 +351,7 @@ async fn process_image_from_source(source: ImageSource) -> anyhow::Result<ocr::O
             } else {
                 path
             };
-            
+
             if std::path::Path::new(&clean_path).exists() {
                 ocr::recognize_image_from_path(&clean_path).await
             } else if clean_path.starts_with("http://") || clean_path.starts_with("https://") {
@@ -547,7 +395,10 @@ async fn process_input(app: &mut App, ltengine: &mut ltengine::LTEngine) -> anyh
     result
 }
 
-async fn process_text_input(app: &mut App, ltengine: &mut ltengine::LTEngine) -> anyhow::Result<()> {
+async fn process_text_input(
+    app: &mut App,
+    ltengine: &mut ltengine::LTEngine,
+) -> anyhow::Result<()> {
     let text = app.input.trim().to_string();
     if text.is_empty() {
         return Ok(());
@@ -560,7 +411,16 @@ async fn process_text_input(app: &mut App, ltengine: &mut ltengine::LTEngine) ->
         let pinyin_lines = pinyin_conv::convert_to_pinyin_lines(&text);
         update_pinyin_display(app, pinyin_lines);
 
-        match translation::translate("zh-CN", target_lang_code, &text, app.translation_service, &app.local_translate_url, ltengine).await {
+        match translation::translate(
+            "zh-CN",
+            target_lang_code,
+            &text,
+            app.translation_service,
+            &app.local_translate_url,
+            ltengine,
+        )
+        .await
+        {
             Ok(translation) => {
                 app.translation = translation;
             }
@@ -572,7 +432,16 @@ async fn process_text_input(app: &mut App, ltengine: &mut ltengine::LTEngine) ->
     } else {
         let target_lang_code = app.target_language.google_code();
 
-        match translation::translate(target_lang_code, "zh-CN", &text, app.translation_service, &app.local_translate_url, ltengine).await {
+        match translation::translate(
+            target_lang_code,
+            "zh-CN",
+            &text,
+            app.translation_service,
+            &app.local_translate_url,
+            ltengine,
+        )
+        .await
+        {
             Ok(chinese_text) => {
                 let pinyin_lines = pinyin_conv::convert_to_pinyin_lines(&chinese_text);
                 update_pinyin_display(app, pinyin_lines);
@@ -592,7 +461,10 @@ async fn process_text_input(app: &mut App, ltengine: &mut ltengine::LTEngine) ->
     Ok(())
 }
 
-async fn process_image_input(app: &mut App, ltengine: &mut ltengine::LTEngine) -> anyhow::Result<()> {
+async fn process_image_input(
+    app: &mut App,
+    ltengine: &mut ltengine::LTEngine,
+) -> anyhow::Result<()> {
     let input = app.input.trim();
 
     use arboard::Clipboard;
@@ -608,24 +480,22 @@ async fn process_image_input(app: &mut App, ltengine: &mut ltengine::LTEngine) -
                 )
                 .await?
             }
-            Err(_) => {
-                match clipboard.get_text() {
-                    Ok(text) => {
-                        if let Some(source) = extract_image_source(&text) {
-                            process_image_from_source(source).await?
-                        } else {
-                            return Err(anyhow::anyhow!(
-                                "No image in clipboard. Copy an image or an image URL first."
-                            ));
-                        }
-                    }
-                    Err(_) => {
+            Err(_) => match clipboard.get_text() {
+                Ok(text) => {
+                    if let Some(source) = extract_image_source(&text) {
+                        process_image_from_source(source).await?
+                    } else {
                         return Err(anyhow::anyhow!(
-                            "No image or text in clipboard. Copy an image first."
+                            "No image in clipboard. Copy an image or an image URL first."
                         ));
                     }
                 }
-            }
+                Err(_) => {
+                    return Err(anyhow::anyhow!(
+                        "No image or text in clipboard. Copy an image first."
+                    ));
+                }
+            },
         }
     } else if input.starts_with("http://") || input.starts_with("https://") {
         let client = reqwest::Client::new();

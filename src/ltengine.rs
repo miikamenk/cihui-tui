@@ -113,7 +113,11 @@ impl LTEngine {
             .timeout(std::time::Duration::from_secs(2))
             .build();
         match client {
-            Ok(c) => c.get(&url).send().await.map_or(false, |r| r.status().is_success()),
+            Ok(c) => c
+                .get(&url)
+                .send()
+                .await
+                .is_ok_and(|r| r.status().is_success()),
             Err(_) => false,
         }
     }

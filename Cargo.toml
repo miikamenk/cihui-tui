@@ -48,3 +48,9 @@ ocr-rs = { git = "https://github.com/zibo-chen/rust-paddle-ocr.git", optional = 
 whisper-rs = { version = "0.16", optional = true }
 cpal = { version = "0.15", optional = true }
 hf-hub = { version = "0.5", optional = true }
+
+[dev-dependencies]
+insta = "1"
+wiremock = "0.6"
+pretty_assertions = "1"
+tokio = { version = "1.41", features = ["macros", "rt-multi-thread", "time"] }

@@ -63,11 +63,8 @@ async fn run_app<W: io::Write>(
     let mut last_tick = std::time::Instant::now();
     let tick_rate = std::time::Duration::from_millis(250);
 
-    let mut ltengine = ltengine::LTEngine::new(
-        5050,
-        app.ltengine_model.clone(),
-        app.ltengine_path.clone(),
-    );
+    let mut ltengine =
+        ltengine::LTEngine::new(5050, app.ltengine_model.clone(), app.ltengine_path.clone());
 
     let (transcription_tx, mut transcription_rx) = mpsc::channel::<TranscriptionEvent>(64);
     let (model_tx, mut model_rx) = mpsc::channel::<Arc<WhisperContext>>(1);
@@ -219,10 +216,7 @@ async fn run_app<W: io::Write>(
     }
 }
 
-fn stop_transcription(
-    handle: &mut Option<transcription::TranscriptionHandle>,
-    app: &mut App,
-) {
+fn stop_transcription(handle: &mut Option<transcription::TranscriptionHandle>, app: &mut App) {
     if let Some(h) = handle.take() {
         h.stop_and_wait();
     }
@@ -262,13 +256,15 @@ async fn process_transcription_text(
         }
 
         let target_code = target_language.google_code();
-        match translation::translate("zh-CN", target_code, text, service, local_url, ltengine).await {
+        match translation::translate("zh-CN", target_code, text, service, local_url, ltengine).await
+        {
             Ok(t) => app.transcription.translation = t,
             Err(_) => {}
         }
     } else {
         let target_code = target_language.google_code();
-        match translation::translate(target_code, "zh-CN", text, service, local_url, ltengine).await {
+        match translation::translate(target_code, "zh-CN", text, service, local_url, ltengine).await
+        {
             Ok(chinese_text) => {
                 let pinyin_lines = pinyin_conv::convert_to_pinyin_lines(&chinese_text);
                 app.transcription.pinyin_lines.clear();

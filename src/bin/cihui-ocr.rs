@@ -60,11 +60,8 @@ async fn run_app<W: io::Write>(
     let tick_rate = std::time::Duration::from_millis(250);
     let debounce_duration = std::time::Duration::from_millis(500);
 
-    let mut ltengine = ltengine::LTEngine::new(
-        5050,
-        app.ltengine_model.clone(),
-        app.ltengine_path.clone(),
-    );
+    let mut ltengine =
+        ltengine::LTEngine::new(5050, app.ltengine_model.clone(), app.ltengine_path.clone());
 
     loop {
         terminal.draw(|f| draw_ui(f, app))?;
@@ -265,7 +262,7 @@ async fn handle_clipboard_paste(app: &mut App) -> anyhow::Result<()> {
                     _ => {}
                 }
             }
-            
+
             match clipboard.get_text() {
                 Ok(text) => {
                     let trimmed = text.trim();
@@ -294,55 +291,55 @@ async fn handle_clipboard_paste(app: &mut App) -> anyhow::Result<()> {
 #[cfg(target_os = "linux")]
 async fn try_external_clipboard_image() -> anyhow::Result<Option<Vec<u8>>> {
     use tokio::process::Command;
-    
+
     let output = Command::new("wl-paste")
         .args(&["--type", "image/png"])
         .output()
         .await;
-    
+
     match output {
         Ok(result) if result.status.success() && !result.stdout.is_empty() => {
             return Ok(Some(result.stdout));
         }
         _ => {}
     }
-    
+
     let output = Command::new("xclip")
         .args(&["-selection", "clipboard", "-t", "image/png", "-o"])
         .output()
         .await;
-    
+
     match output {
         Ok(result) if result.status.success() && !result.stdout.is_empty() => {
             return Ok(Some(result.stdout));
         }
         _ => {}
     }
-    
+
     let output = Command::new("xclip")
         .args(&["-selection", "clipboard", "-t", "image/jpeg", "-o"])
         .output()
         .await;
-    
+
     match output {
         Ok(result) if result.status.success() && !result.stdout.is_empty() => {
             return Ok(Some(result.stdout));
         }
         _ => {}
     }
-    
+
     let output = Command::new("xclip")
         .args(&["-selection", "clipboard", "-t", "image/bmp", "-o"])
         .output()
         .await;
-    
+
     match output {
         Ok(result) if result.status.success() && !result.stdout.is_empty() => {
             return Ok(Some(result.stdout));
         }
         _ => {}
     }
-    
+
     Ok(None)
 }
 
@@ -354,7 +351,7 @@ async fn process_image_from_source(source: ImageSource) -> anyhow::Result<ocr::O
             } else {
                 path
             };
-            
+
             if std::path::Path::new(&clean_path).exists() {
                 ocr::recognize_image_from_path(&clean_path).await
             } else if clean_path.starts_with("http://") || clean_path.starts_with("https://") {
@@ -398,7 +395,10 @@ async fn process_input(app: &mut App, ltengine: &mut ltengine::LTEngine) -> anyh
     result
 }
 
-async fn process_text_input(app: &mut App, ltengine: &mut ltengine::LTEngine) -> anyhow::Result<()> {
+async fn process_text_input(
+    app: &mut App,
+    ltengine: &mut ltengine::LTEngine,
+) -> anyhow::Result<()> {
     let text = app.input.trim().to_string();
     if text.is_empty() {
         return Ok(());
@@ -411,7 +411,16 @@ async fn process_text_input(app: &mut App, ltengine: &mut ltengine::LTEngine) ->
         let pinyin_lines = pinyin_conv::convert_to_pinyin_lines(&text);
         update_pinyin_display(app, pinyin_lines);
 
-        match translation::translate("zh-CN", target_lang_code, &text, app.translation_service, &app.local_translate_url, ltengine).await {
+        match translation::translate(
+            "zh-CN",
+            target_lang_code,
+            &text,
+            app.translation_service,
+            &app.local_translate_url,
+            ltengine,
+        )
+        .await
+        {
             Ok(translation) => {
                 app.translation = translation;
             }
@@ -423,7 +432,16 @@ async fn process_text_input(app: &mut App, ltengine: &mut ltengine::LTEngine) ->
     } else {
         let target_lang_code = app.target_language.google_code();
 
-        match translation::translate(target_lang_code, "zh-CN", &text, app.translation_service, &app.local_translate_url, ltengine).await {
+        match translation::translate(
+            target_lang_code,
+            "zh-CN",
+            &text,
+            app.translation_service,
+            &app.local_translate_url,
+            ltengine,
+        )
+        .await
+        {
             Ok(chinese_text) => {
                 let pinyin_lines = pinyin_conv::convert_to_pinyin_lines(&chinese_text);
                 update_pinyin_display(app, pinyin_lines);
@@ -443,7 +461,10 @@ async fn process_text_input(app: &mut App, ltengine: &mut ltengine::LTEngine) ->
     Ok(())
 }
 
-async fn process_image_input(app: &mut App, ltengine: &mut ltengine::LTEngine) -> anyhow::Result<()> {
+async fn process_image_input(
+    app: &mut App,
+    ltengine: &mut ltengine::LTEngine,
+) -> anyhow::Result<()> {
     let input = app.input.trim();
 
     use arboard::Clipboard;
@@ -459,24 +480,22 @@ async fn process_image_input(app: &mut App, ltengine: &mut ltengine::LTEngine) -
                 )
                 .await?
             }
-            Err(_) => {
-                match clipboard.get_text() {
-                    Ok(text) => {
-                        if let Some(source) = extract_image_source(&text) {
-                            process_image_from_source(source).await?
-                        } else {
-                            return Err(anyhow::anyhow!(
-                                "No image in clipboard. Copy an image or an image URL first."
-                            ));
-                        }
-                    }
-                    Err(_) => {
+            Err(_) => match clipboard.get_text() {
+                Ok(text) => {
+                    if let Some(source) = extract_image_source(&text) {
+                        process_image_from_source(source).await?
+                    } else {
                         return Err(anyhow::anyhow!(
-                            "No image or text in clipboard. Copy an image first."
+                            "No image in clipboard. Copy an image or an image URL first."
                         ));
                     }
                 }
-            }
+                Err(_) => {
+                    return Err(anyhow::anyhow!(
+                        "No image or text in clipboard. Copy an image first."
+                    ));
+                }
+            },
         }
     } else if input.starts_with("http://") || input.starts_with("https://") {
         let client = reqwest::Client::new();

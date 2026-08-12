@@ -1,8 +1,8 @@
 use cpal::traits::{DeviceTrait, HostTrait};
 use cpal::SampleFormat;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
@@ -53,7 +53,7 @@ pub fn list_input_devices() -> Vec<AudioDevice> {
     // First try cpal device enumeration for better name compatibility
     let host = cpal::default_host();
     let mut devices = Vec::new();
-    
+
     if let Ok(input_devices) = host.input_devices() {
         for device in input_devices {
             if let Ok(name) = device.name() {
@@ -63,16 +63,16 @@ pub fn list_input_devices() -> Vec<AudioDevice> {
             }
         }
     }
-    
+
     if !devices.is_empty() {
         return devices;
     }
-    
+
     // Fallback to pactl
     if let Some(pactl_devices) = list_devices_pactl() {
         return pactl_devices;
     }
-    
+
     devices
 }
 
@@ -216,7 +216,12 @@ pub fn start_transcription(
     let device_name_capture = device_name.clone();
     let shutdown_signal_capture = shutdown_signal.clone();
     let audio_thread = std::thread::spawn(move || {
-        if let Err(e) = run_audio_capture(audio_buf_capture, sample_rate_capture, device_name_capture, shutdown_signal_capture) {
+        if let Err(e) = run_audio_capture(
+            audio_buf_capture,
+            sample_rate_capture,
+            device_name_capture,
+            shutdown_signal_capture,
+        ) {
             let _ = tx_err.try_send(TranscriptionEvent::Error(format!("Audio error: {}", e)));
         }
     });
@@ -246,8 +251,7 @@ pub fn start_transcription(
             };
 
             // Simple VAD: check RMS energy
-            let rms =
-                (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
+            let rms = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
             let is_voice = rms > 0.005;
             let _ = tx.send(TranscriptionEvent::VadActivity(is_voice)).await;
 
@@ -279,8 +283,8 @@ pub fn start_transcription(
                 params.set_single_segment(false);
 
                 if let Err(e) = state.full(params, &samples) {
-                    let _ = tx
-                        .try_send(TranscriptionEvent::Error(format!("Inference error: {}", e)));
+                    let _ =
+                        tx.try_send(TranscriptionEvent::Error(format!("Inference error: {}", e)));
                     return;
                 }
 
@@ -327,32 +331,32 @@ fn run_audio_capture(
     }
 
     let host = cpal::default_host();
-    
+
     // Try to find the requested device by name, otherwise use default
     let device = if let Some(ref name) = device_name {
         eprintln!("[Audio] Looking for device: {}", name);
-        
+
         // Search for device by name with more flexible matching
         let mut found_device = None;
         let name_lower = name.to_lowercase();
-        
+
         if let Ok(devices) = host.input_devices() {
             let device_list: Vec<_> = devices.collect();
             eprintln!("[Audio] Found {} cpal devices", device_list.len());
-            
+
             // First pass: try exact or substring match
             for d in &device_list {
                 if let Ok(d_name) = d.name() {
                     eprintln!("[Audio] Checking device: {}", d_name);
                     let d_name_lower = d_name.to_lowercase();
-                    
+
                     // Check for exact match
                     if d_name_lower == name_lower {
                         eprintln!("[Audio] Found exact match: {}", d_name);
                         found_device = Some(d.clone());
                         break;
                     }
-                    
+
                     // Check if either contains the other
                     if d_name_lower.contains(&name_lower) || name_lower.contains(&d_name_lower) {
                         eprintln!("[Audio] Found substring match: {}", d_name);
@@ -361,7 +365,7 @@ fn run_audio_capture(
                     }
                 }
             }
-            
+
             // Second pass: word-based matching
             if found_device.is_none() {
                 let name_words: Vec<&str> = name_lower.split_whitespace().collect();
@@ -383,16 +387,17 @@ fn run_audio_capture(
                 }
             }
         }
-        
+
         if found_device.is_none() {
             eprintln!("[Audio] No matching device found, using default");
         }
-        
+
         found_device.or_else(|| host.default_input_device())
     } else {
         eprintln!("[Audio] No device specified, using default");
         host.default_input_device()
-    }.ok_or_else(|| anyhow::anyhow!("No input device found"))?;
+    }
+    .ok_or_else(|| anyhow::anyhow!("No input device found"))?;
 
     let device_name_str = device.name().unwrap_or_else(|_| "unknown".to_string());
     eprintln!("[Audio] Using device: {}", device_name_str);

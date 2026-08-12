@@ -35,26 +35,18 @@ pub async fn translate(
 
     match service {
         TranslationService::Auto => translate_auto(source, target, text, local_url, ltengine).await,
-        TranslationService::Google => {
-            translate_with_google(text, source, target)
-                .await
-                .or_else(|_| Ok(format!("[Google Translate unavailable] {}", text)))
-        }
-        TranslationService::MyMemory => {
-            translate_with_mymemory(text, source, target)
-                .await
-                .or_else(|_| Ok(format!("[MyMemory unavailable] {}", text)))
-        }
-        TranslationService::LibreTranslate => {
-            translate_with_libretranslate(text, source, target)
-                .await
-                .or_else(|_| Ok(format!("[LibreTranslate unavailable] {}", text)))
-        }
-        TranslationService::LTEngine => {
-            translate_with_ltengine(text, source, target, ltengine)
-                .await
-                .or_else(|e| Ok(format!("[LTEngine: {}] {}", e, text)))
-        }
+        TranslationService::Google => translate_with_google(text, source, target)
+            .await
+            .or_else(|_| Ok(format!("[Google Translate unavailable] {}", text))),
+        TranslationService::MyMemory => translate_with_mymemory(text, source, target)
+            .await
+            .or_else(|_| Ok(format!("[MyMemory unavailable] {}", text))),
+        TranslationService::LibreTranslate => translate_with_libretranslate(text, source, target)
+            .await
+            .or_else(|_| Ok(format!("[LibreTranslate unavailable] {}", text))),
+        TranslationService::LTEngine => translate_with_ltengine(text, source, target, ltengine)
+            .await
+            .or_else(|e| Ok(format!("[LTEngine: {}] {}", e, text))),
     }
 }
 
@@ -87,14 +79,36 @@ async fn translate_auto(
 
 /// Legacy function for Chinese to English translation
 #[allow(dead_code)]
-pub async fn translate_chinese_to_english(text: &str, ltengine: &mut LTEngine) -> anyhow::Result<String> {
-    translate("zh-CN", "en", text, TranslationService::Auto, "http://localhost:5050", ltengine).await
+pub async fn translate_chinese_to_english(
+    text: &str,
+    ltengine: &mut LTEngine,
+) -> anyhow::Result<String> {
+    translate(
+        "zh-CN",
+        "en",
+        text,
+        TranslationService::Auto,
+        "http://localhost:5050",
+        ltengine,
+    )
+    .await
 }
 
 /// Legacy function for English to Chinese translation
 #[allow(dead_code)]
-pub async fn translate_english_to_chinese(text: &str, ltengine: &mut LTEngine) -> anyhow::Result<String> {
-    translate("en", "zh-CN", text, TranslationService::Auto, "http://localhost:5050", ltengine).await
+pub async fn translate_english_to_chinese(
+    text: &str,
+    ltengine: &mut LTEngine,
+) -> anyhow::Result<String> {
+    translate(
+        "en",
+        "zh-CN",
+        text,
+        TranslationService::Auto,
+        "http://localhost:5050",
+        ltengine,
+    )
+    .await
 }
 
 async fn translate_with_google(text: &str, source: &str, target: &str) -> anyhow::Result<String> {
@@ -278,10 +292,7 @@ async fn translate_with_ltengine(
         Ok(data) => Ok(data.translated_text),
         Err(e) => {
             eprintln!("LTEngine response: {}", body);
-            Err(anyhow::anyhow!(
-                "Failed to parse LTEngine response: {}",
-                e
-            ))
+            Err(anyhow::anyhow!("Failed to parse LTEngine response: {}", e))
         }
     }
 }

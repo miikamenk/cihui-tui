@@ -1,0 +1,94 @@
+name: test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The whole hermetic suite runs without any optional feature, so this job
+  # needs no C++ toolchain and finishes in seconds. It is the gate that
+  # matters for day-to-day work.
+  fast:
+    name: fmt, clippy and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@nextest
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      # Scoped to this crate rather than set through RUSTFLAGS, which would
+      # also fail the build on warnings from dependencies.
+      - name: Lint
+        run: cargo clippy --no-default-features --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo nextest run --no-default-features --profile ci
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-core
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
+
+  # The optional features each pull in a native build - whisper.cpp for
+  # transcription, MNN through the ocr-rs git dependency for ocr - so they get
+  # their own cached jobs rather than slowing down the gate above.
+  features:
+    name: ${{ matrix.feature }} build and tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        feature: [transcription, ocr]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.feature }}
+
+      - uses: taiki-e/install-action@nextest
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          # cpal needs ALSA headers; the MNN build needs cmake and a C++
+          # compiler driven through clang.
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libasound2-dev cmake clang
+
+      - name: Run tests
+        run: |
+          cargo nextest run --no-default-features \
+            --features ${{ matrix.feature }} --profile ci
+
+      - name: Build the binary
+        run: |
+          cargo build --release --no-default-features \
+            --features ${{ matrix.feature }} \
+            --bin ${{ matrix.feature == 'ocr' && 'cihui-ocr' || 'cihui-transcribe' }}
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ matrix.feature }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn

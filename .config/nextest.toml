@@ -1,0 +1,39 @@
+# cargo-nextest configuration.
+#
+# Profiles are selected with --profile; "default" is used otherwise.
+# See https://nexte.st/docs/configuration/ for the full reference.
+
+[profile.default]
+# Show each failure as it happens and again in a summary at the end, so a
+# failure part-way through a long run is still visible when it finishes.
+failure-output = "immediate-final"
+
+# Nothing in the hermetic suite talks to the network or sleeps, so anything
+# that takes more than a couple of seconds is stuck rather than slow. Report
+# it at 10s and kill it after three periods.
+slow-timeout = { period = "10s", terminate-after = 3 }
+
+# Retrying hides flakiness locally; CI retries instead.
+retries = 0
+
+[profile.ci]
+# Report every failure in one run rather than stopping at the first, so a
+# push does not need several round trips to see all the breakage.
+fail-fast = false
+failure-output = "immediate-final"
+
+# The live endpoint tests are excluded from CI, but retries also absorb the
+# occasional port collision when several wiremock servers start at once.
+retries = 2
+
+# Consumed by the workflow to annotate the run with test results.
+[profile.ci.junit]
+path = "junit.xml"
+
+# The live tests reach out to free translation APIs, which are slow and rate
+# limited. They are #[ignore]d, so this profile only matters when they are
+# explicitly run with --run-ignored.
+[profile.live]
+failure-output = "immediate-final"
+slow-timeout = { period = "30s", terminate-after = 4 }
+retries = 1

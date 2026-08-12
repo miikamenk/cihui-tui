@@ -15,15 +15,11 @@ pub fn handle_settings_input(app: &mut App, key: KeyEvent) {
         KeyCode::Up => app.settings_move_up(),
         KeyCode::Down => app.settings_move_down(),
         KeyCode::Enter | KeyCode::Char(' ') => app.settings_select(),
-        KeyCode::Left => {
-            if app.settings_selection == 1 {
-                app.cycle_translation_service_backward();
-            }
+        KeyCode::Left if app.settings_selection == 1 => {
+            app.cycle_translation_service_backward();
         }
-        KeyCode::Right => {
-            if app.settings_selection == 1 {
-                app.cycle_translation_service_forward();
-            }
+        KeyCode::Right if app.settings_selection == 1 => {
+            app.cycle_translation_service_forward();
         }
         _ => {}
     }

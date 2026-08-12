@@ -117,7 +117,7 @@ impl LTEngine {
                 .get(&url)
                 .send()
                 .await
-                .map_or(false, |r| r.status().is_success()),
+                .is_ok_and(|r| r.status().is_success()),
             Err(_) => false,
         }
     }

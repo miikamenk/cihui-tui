@@ -687,6 +687,10 @@ impl App {
         }
     }
 
+    // The loop indices below are line offsets, not just element access: they
+    // become line_start and next_line_start, so iterating over the characters
+    // instead would not be simpler.
+    #[allow(clippy::needless_range_loop)]
     pub fn move_cursor_down(&mut self) {
         self.select_all = false;
         let chars: Vec<char> = self.input.chars().collect();

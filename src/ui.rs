@@ -171,9 +171,12 @@ fn draw_input(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     if !app.processing && !app.settings_open && !app.language_selector_open {
         let inner_width = (area.width as usize).saturating_sub(2); // subtract borders
         let chars: Vec<char> = app.input.chars().collect();
+        // The index bounds the walk at the cursor, so this is a prefix scan
+        // rather than a plain iteration over the characters.
         let mut visual_row: u16 = 0;
         let mut visual_col: usize = 0;
 
+        #[allow(clippy::needless_range_loop)]
         for i in 0..app.cursor_position.min(chars.len()) {
             if chars[i] == '\n' {
                 visual_row += 1;

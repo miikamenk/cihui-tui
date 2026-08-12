@@ -83,11 +83,9 @@ fn tokenize(text: &str) -> Vec<Token> {
             last_was_chinese = true;
         } else if is_punctuation(c) && last_was_chinese {
             // Attach punctuation to previous Chinese character
-            if let Some(last) = tokens.last_mut() {
-                if let Token::Chinese { hanzi, pinyin: _ } = last {
-                    // Append punctuation to the hanzi string
-                    hanzi.push(c);
-                }
+            if let Some(Token::Chinese { hanzi, pinyin: _ }) = tokens.last_mut() {
+                // Append punctuation to the hanzi string
+                hanzi.push(c);
             }
         } else {
             // Non-Chinese, non-punctuation character (part of English word)
@@ -157,11 +155,7 @@ fn build_line(tokens: &[Token]) -> PinyinLine {
         aligned_hanzi.push_str(hanzi);
         // Add extra spaces if hanzi display width is less than column width
         // For Chinese chars (width 2), we need to account for their visual width
-        let visual_padding = if hanzi_display < width {
-            width - hanzi_display
-        } else {
-            0
-        };
+        let visual_padding = width.saturating_sub(hanzi_display);
         for _ in 0..visual_padding {
             aligned_hanzi.push(' ');
         }

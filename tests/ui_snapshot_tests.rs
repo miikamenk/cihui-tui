@@ -16,10 +16,7 @@ use cihui_tui::language::Language;
 use cihui_tui::pinyin_conv::convert_to_pinyin_lines;
 use cihui_tui::ui::{draw_ui, update_pinyin_display};
 use common::TestApp;
-use ratatui::{
-    backend::{Backend, TestBackend},
-    Terminal,
-};
+use ratatui::{backend::TestBackend, Terminal};
 
 /// Draw the app into an 100x30 buffer, the size the snapshots assume.
 fn render(app: &TestApp) -> Terminal<TestBackend> {

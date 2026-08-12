@@ -6,8 +6,9 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub enum TranslationService {
+    #[default]
     Auto,
     Google,
     MyMemory,
@@ -86,12 +87,6 @@ fn default_ltengine_model() -> String {
 
 fn default_ltengine_path() -> String {
     "ltengine".to_string()
-}
-
-impl Default for TranslationService {
-    fn default() -> Self {
-        TranslationService::Auto
-    }
 }
 
 impl Default for Config {

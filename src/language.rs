@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Language {
     Afrikaans,
     Albanian,
@@ -28,6 +28,7 @@ pub enum Language {
     Dhivehi,
     Dogri,
     Dutch,
+    #[default]
     English,
     Esperanto,
     Estonian,
@@ -566,11 +567,5 @@ impl Language {
             .into_iter()
             .filter(|l| !l.is_chinese())
             .collect()
-    }
-}
-
-impl Default for Language {
-    fn default() -> Self {
-        Language::English
     }
 }

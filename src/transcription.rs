@@ -479,17 +479,12 @@ fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub enum TranscriptionLanguage {
     English,
     Chinese,
+    #[default]
     Auto,
-}
-
-impl Default for TranscriptionLanguage {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 impl TranscriptionLanguage {
@@ -518,18 +513,13 @@ impl TranscriptionLanguage {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub enum WhisperModelSize {
+    #[default]
     Tiny,
     Base,
     Medium,
     LargeV3Turbo,
-}
-
-impl Default for WhisperModelSize {
-    fn default() -> Self {
-        Self::Tiny
-    }
 }
 
 impl WhisperModelSize {

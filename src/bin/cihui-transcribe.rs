@@ -167,43 +167,40 @@ async fn run_app<W: io::Write>(
                         }
                     }
 
-                    match key.code {
-                        KeyCode::Char(' ') => {
-                            if app.transcription.is_recording {
-                                stop_transcription(&mut transcription_handle, app);
-                            } else if app.transcription.model_ready {
-                                if let Some(ref model) = whisper_model {
-                                    let handle = transcription::start_transcription(
-                                        model.clone(),
-                                        app.transcription.language,
-                                        app.transcription.selected_device.clone(),
-                                        transcription_tx.clone(),
-                                    );
-                                    transcription_handle = Some(handle);
-                                    app.transcription.is_recording = true;
-                                    app.transcription.status = "Recording...".into();
-                                }
-                            } else if !app.transcription.model_loading {
-                                let tx = transcription_tx.clone();
-                                let mtx = model_tx.clone();
-                                let model_size = app.transcription.model_size;
-                                let language = app.transcription.language;
-                                app.transcription.model_loading = true;
-                                app.transcription.status = "Loading model...".into();
-                                tokio::spawn(async move {
-                                    match transcription::load_model(model_size, language, tx.clone()).await {
-                                        Ok(m) => { let _ = mtx.send(m).await; }
-                                        Err(e) => {
-                                            let _ = tx.send(TranscriptionEvent::Error(
-                                                format!("Model load failed: {}", e),
-                                            )).await;
-                                        }
-                                    }
-                                });
+                    if key.code == KeyCode::Char(' ') {
+                        if app.transcription.is_recording {
+                            stop_transcription(&mut transcription_handle, app);
+                        } else if app.transcription.model_ready {
+                            if let Some(ref model) = whisper_model {
+                                let handle = transcription::start_transcription(
+                                    model.clone(),
+                                    app.transcription.language,
+                                    app.transcription.selected_device.clone(),
+                                    transcription_tx.clone(),
+                                );
+                                transcription_handle = Some(handle);
+                                app.transcription.is_recording = true;
+                                app.transcription.status = "Recording...".into();
                             }
-                            continue;
+                        } else if !app.transcription.model_loading {
+                            let tx = transcription_tx.clone();
+                            let mtx = model_tx.clone();
+                            let model_size = app.transcription.model_size;
+                            let language = app.transcription.language;
+                            app.transcription.model_loading = true;
+                            app.transcription.status = "Loading model...".into();
+                            tokio::spawn(async move {
+                                match transcription::load_model(model_size, language, tx.clone()).await {
+                                    Ok(m) => { let _ = mtx.send(m).await; }
+                                    Err(e) => {
+                                        let _ = tx.send(TranscriptionEvent::Error(
+                                            format!("Model load failed: {}", e),
+                                        )).await;
+                                    }
+                                }
+                            });
                         }
-                        _ => {}
+                        continue;
                     }
                 }
             }
@@ -256,26 +253,24 @@ async fn process_transcription_text(
         }
 
         let target_code = target_language.google_code();
-        match translation::translate("zh-CN", target_code, text, service, local_url, ltengine).await
+        if let Ok(t) =
+            translation::translate("zh-CN", target_code, text, service, local_url, ltengine).await
         {
-            Ok(t) => app.transcription.translation = t,
-            Err(_) => {}
+            app.transcription.translation = t;
         }
     } else {
         let target_code = target_language.google_code();
-        match translation::translate(target_code, "zh-CN", text, service, local_url, ltengine).await
+        if let Ok(chinese_text) =
+            translation::translate(target_code, "zh-CN", text, service, local_url, ltengine).await
         {
-            Ok(chinese_text) => {
-                let pinyin_lines = pinyin_conv::convert_to_pinyin_lines(&chinese_text);
-                app.transcription.pinyin_lines.clear();
-                app.transcription.hanzi_lines.clear();
-                for line in pinyin_lines {
-                    app.transcription.pinyin_lines.push(line.pinyin);
-                    app.transcription.hanzi_lines.push(line.hanzi);
-                }
-                app.transcription.translation = chinese_text;
+            let pinyin_lines = pinyin_conv::convert_to_pinyin_lines(&chinese_text);
+            app.transcription.pinyin_lines.clear();
+            app.transcription.hanzi_lines.clear();
+            for line in pinyin_lines {
+                app.transcription.pinyin_lines.push(line.pinyin);
+                app.transcription.hanzi_lines.push(line.hanzi);
             }
-            Err(_) => {}
+            app.transcription.translation = chinese_text;
         }
     }
 }

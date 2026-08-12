@@ -88,10 +88,12 @@ fn save_then_load_round_trips() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.json");
 
-    let mut original = Config::default();
-    original.target_language = Language::Finnish;
-    original.translation_service = TranslationService::MyMemory;
-    original.ltengine_model = "custom-model".to_string();
+    let original = Config {
+        target_language: Language::Finnish,
+        translation_service: TranslationService::MyMemory,
+        ltengine_model: "custom-model".to_string(),
+        ..Config::default()
+    };
     original.save_to(&path).unwrap();
 
     let loaded = Config::load_from(&path).unwrap();

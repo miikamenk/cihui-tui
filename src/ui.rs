@@ -345,7 +345,7 @@ fn draw_language_selector(f: &mut Frame, app: &App) {
 
     // Separator
     lines.push(Line::from(vec![Span::styled(
-        "─".repeat(popup_area.width as usize - 2),
+        "─".repeat((popup_area.width as usize).saturating_sub(2)),
         Style::default().fg(Color::Gray),
     )]));
 
@@ -365,7 +365,7 @@ fn draw_language_selector(f: &mut Frame, app: &App) {
         .iter()
         .enumerate()
         .skip(start_idx)
-        .take(end_idx - start_idx)
+        .take(end_idx.saturating_sub(start_idx))
     {
         let is_selected = idx == scroll;
         let is_current = language == app.target_language;
@@ -774,7 +774,7 @@ fn draw_device_selector(f: &mut Frame, app: &App) {
             .iter()
             .enumerate()
             .skip(start)
-            .take(end - start)
+            .take(end.saturating_sub(start))
         {
             let is_selected = idx == scroll;
             let is_current =

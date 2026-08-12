@@ -256,44 +256,187 @@ fn get_pinyin_for_char(c: char) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// Tokens as `(pinyin, hanzi)` pairs, for readable assertions.
+    fn token_pairs(text: &str) -> Vec<(String, String)> {
+        tokenize(text)
+            .into_iter()
+            .map(|t| match t {
+                Token::Chinese { hanzi, pinyin } => (pinyin, hanzi),
+                Token::English(word) => (word.clone(), word),
+            })
+            .collect()
+    }
+
+    // ------------------------------------------------------------ tokenize --
+
     #[test]
-    fn test_simple_conversion() {
-        let result = convert_to_pinyin_lines("你好世界");
-        assert!(!result.is_empty());
-        let line = &result[0];
-        assert!(line.pinyin.contains("nǐ"));
-        assert!(line.pinyin.contains("hǎo"));
-        assert!(line.hanzi.contains("你"));
-        assert!(line.hanzi.contains("好"));
+    fn tokenize_splits_hanzi_one_per_token() {
+        let tokens = token_pairs("你好");
+
+        assert_eq!(
+            tokens,
+            vec![
+                ("nǐ".to_string(), "你".to_string()),
+                ("hǎo".to_string(), "好".to_string()),
+            ]
+        );
     }
 
     #[test]
-    fn test_english_word() {
-        let result = convert_to_pinyin_lines("this");
-        assert!(!result.is_empty());
-        let line = &result[0];
-        assert_eq!(line.pinyin, "this");
-        assert_eq!(line.hanzi, "this");
+    fn tokenize_buffers_english_runs_into_one_token() {
+        let tokens = token_pairs("hello world");
+
+        assert_eq!(
+            tokens,
+            vec![
+                ("hello".to_string(), "hello".to_string()),
+                ("world".to_string(), "world".to_string()),
+            ]
+        );
     }
 
     #[test]
-    fn test_mixed_content() {
-        let result = convert_to_pinyin_lines("认推给word别");
-        assert!(!result.is_empty());
-        let line = &result[0];
-        // Pinyin should be: "rèn tuī gěi word bié"
-        // Hanzi should be:   "认 推 给 word 别"
-        assert!(line.pinyin.contains("rèn"));
-        assert!(line.pinyin.contains("tuī"));
-        assert!(line.pinyin.contains("gěi"));
-        assert!(line.pinyin.contains("word"));
-        assert!(line.pinyin.contains("bié"));
+    fn tokenize_attaches_punctuation_to_the_preceding_hanzi() {
+        // Punctuation gets no column of its own; it rides along with the
+        // character before it so the pinyin above stays aligned.
+        let tokens = token_pairs("你好，世界");
+
+        assert_eq!(
+            tokens,
+            vec![
+                ("nǐ".to_string(), "你".to_string()),
+                ("hǎo".to_string(), "好，".to_string()),
+                ("shì".to_string(), "世".to_string()),
+                ("jiè".to_string(), "界".to_string()),
+            ]
+        );
     }
 
     #[test]
-    fn test_is_chinese() {
+    fn tokenize_keeps_punctuation_inside_english_words() {
+        // last_was_chinese is false here, so the punctuation stays in the
+        // English buffer rather than being attached to a hanzi token.
+        let tokens = token_pairs("e.g. test");
+
+        assert_eq!(
+            tokens,
+            vec![
+                ("e.g.".to_string(), "e.g.".to_string()),
+                ("test".to_string(), "test".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenize_handles_empty_and_whitespace_input() {
+        assert!(tokenize("").is_empty());
+        assert!(tokenize("   \t  ").is_empty());
+    }
+
+    #[test]
+    fn tokenize_keeps_rare_hanzi_rather_than_dropping_them() {
+        // Extension A and the compatibility block are inside is_chinese, so
+        // they must produce Chinese tokens even though they are rare. A
+        // character with no pinyin reading gets an empty one, not a
+        // disappearing token.
+        for c in ['\u{3400}', '\u{f900}'] {
+            let tokens = tokenize(&c.to_string());
+
+            assert_eq!(tokens.len(), 1, "{c:?} should produce exactly one token");
+            match &tokens[0] {
+                Token::Chinese { hanzi, .. } => assert_eq!(hanzi, &c.to_string()),
+                other => panic!("expected a Chinese token for {c:?}, got {other:?}"),
+            }
+        }
+    }
+
+    // -------------------------------------------------------- classifiers --
+
+    #[test]
+    fn is_chinese_covers_the_cjk_ranges() {
         assert!(is_chinese('中'));
+        assert!(is_chinese('\u{4e00}'));
+        assert!(is_chinese('\u{9fff}'));
+        assert!(is_chinese('\u{3400}'));
+        assert!(is_chinese('\u{f900}'));
+
         assert!(!is_chinese('a'));
         assert!(!is_chinese('1'));
+        assert!(!is_chinese('，'));
+        assert!(!is_chinese('\u{33ff}'));
+        assert!(!is_chinese('\u{a000}'));
+    }
+
+    #[test]
+    fn is_punctuation_covers_both_scripts() {
+        for c in ['，', '。', '！', '？', '、', '《', '》', '…'] {
+            assert!(is_punctuation(c), "{c} should be punctuation");
+        }
+        for c in [',', '.', '!', '?', '(', ')', '[', ']'] {
+            assert!(is_punctuation(c), "{c} should be punctuation");
+        }
+
+        assert!(!is_punctuation('a'));
+        assert!(!is_punctuation('中'));
+        assert!(!is_punctuation(' '));
+    }
+
+    // ------------------------------------------------------- display width --
+
+    #[test]
+    fn token_width_counts_hanzi_as_two_columns() {
+        let token = Token::Chinese {
+            hanzi: "你".to_string(),
+            pinyin: "nǐ".to_string(),
+        };
+
+        // max(pinyin 2, hanzi 2) + 1 separator.
+        assert_eq!(get_token_display_width(&token), 3);
+    }
+
+    #[test]
+    fn token_width_follows_the_wider_of_pinyin_and_hanzi() {
+        let token = Token::Chinese {
+            hanzi: "谢".to_string(),
+            pinyin: "xiè".to_string(),
+        };
+
+        // max(pinyin 3, hanzi 2) + 1 separator.
+        assert_eq!(get_token_display_width(&token), 4);
+    }
+
+    #[test]
+    fn token_width_counts_english_as_one_column_per_char() {
+        let token = Token::English("word".to_string());
+
+        assert_eq!(get_token_display_width(&token), 5);
+    }
+
+    // ------------------------------------------------------------ build_line --
+
+    #[test]
+    fn build_line_pads_columns_so_rows_align() {
+        let line = build_line(&tokenize("你好"));
+
+        assert_eq!(line.pinyin, "nǐ hǎo");
+        assert_eq!(line.hanzi, "你 好");
+    }
+
+    #[test]
+    fn build_line_widens_columns_for_long_pinyin() {
+        // "zhōng" is 5 columns wide but the hanzi is 2, so the hanzi row needs
+        // three spaces of padding to keep the next column lined up.
+        let line = build_line(&tokenize("中国"));
+
+        assert_eq!(line.pinyin, "zhōng guó");
+        assert_eq!(line.hanzi, "中    国");
+    }
+
+    #[test]
+    fn build_line_does_not_pad_past_the_last_column() {
+        let line = build_line(&tokenize("你"));
+
+        assert_eq!(line.pinyin, "nǐ");
+        assert_eq!(line.hanzi, "你");
     }
 }

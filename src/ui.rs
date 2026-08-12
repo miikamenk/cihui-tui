@@ -950,7 +950,7 @@ fn is_wide_char(c: char) -> bool {
         || ('\u{20000}'..='\u{2a6df}').contains(&c)
         || ('\u{2a700}'..='\u{2b73f}').contains(&c)
         || ('\u{2b740}'..='\u{2b81f}').contains(&c)
-        || c == '\u{3000}'  // Full-width space
+        || ('\u{3000}'..='\u{303f}').contains(&c)  // CJK symbols and punctuation
         || ('\u{ff01}'..='\u{ff5e}').contains(&c)  // Full-width ASCII
         || ('\u{ff5f}'..='\u{ff60}').contains(&c)  // Full-width brackets
         || ('\u{ffe0}'..='\u{ffe6}').contains(&c) // Full-width symbols
